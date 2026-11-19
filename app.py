@@ -1,24 +1,5 @@
 # Nifty-XAI (Fixed Version) - Education purpose only
 # Run: streamlit run app.py
-#
-# requirements.txt:
-#   streamlit
-#   yfinance
-#   pandas
-#   numpy
-#   scikit-learn
-#   xgboost
-#   tensorflow-cpu   (optional - LSTM venumna mattum)
-#
-# FIXES vs old code:
-#  1. Prediction ippo LATEST day features la irundhu (naalaiku) - dhaan. Munna yesterday features use aagudhu.
-#  2. Scaler train data la mattum fit (LSTM leakage fix).
-#  3. Fake "Expected Price" (prob*1.2%) remove. Ippo historical avg up/down move vachi expected return.
-#  4. Buy + Sell rendu side charges: brokerage, STT (rendu side), stamp (buy), exchange, SEBI, GST, DP (sell, per stock).
-#  5. Budget thaandi vaanga maatom (qty=0 na skip).
-#  6. Accuracy ku baseline (majority class + naive) comparison, edge kaattum.
-#  7. LSTM illa na NaN (0 illa). Errors maraikkama kaattum.
-#  8. Data cache, 4-model table progress bar, LSTM optional.
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -35,13 +16,13 @@ st.set_page_config(page_title="Nifty-XAI", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
-.ticker {background-color:#1a237e;color:white;padding:10px;border-radius:8px;font-weight:bold;font-size:14px;overflow-x:auto;white-space:nowrap;}
+.ticker {background-color:#1a237e;color:white;padding:10px;border-radius:8px;font-weight:bold;font-size:14px;overflow:hidden;white-space:nowrap;}
 .ticker span {margin-right:28px;}
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------
-# 1. STOCK LIST (Nifty 50 constituents maaralaam - NSE site la verify pannunga)
+# 1. STOCK LIST
 # ------------------------------------------------
 nifty_50_sector = {
     "HDFCBANK.NS": ("HDFC Bank", "Banking"), "ICICIBANK.NS": ("ICICI Bank", "Banking"),
@@ -88,7 +69,6 @@ feature_cols = ['Return_1d', 'Return_5d', 'Return_10d', 'Return_20d',
                 'MA_Ratio_5_20', 'MA_Ratio_20_50', 'Price_vs_MA20',
                 'Vol_10', 'Vol_20', 'RSI', 'Vol_Change']
 
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_data(symbol, years):
     df = yf.download(symbol, period=f"{years}y", progress=False, auto_adjust=True)
@@ -97,7 +77,6 @@ def load_data(symbol, years):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
-
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_last_close(symbol):
@@ -110,9 +89,7 @@ def get_last_close(symbol):
         pass
     return 0.0, 0.0
 
-
 def make_features(raw):
-    """Latest row ah DROP pannala. Latest row = naalaiku prediction ku. Target adhukku NaN."""
     df = raw.copy()
     df['Return_1d'] = df['Close'].pct_change(1)
     df['Return_5d'] = df['Close'].pct_change(5)
@@ -131,26 +108,22 @@ def make_features(raw):
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean().replace(0, 1e-10)
     df['RSI'] = (100 - 100 / (1 + gain / loss)).clip(0, 100)
     df['Vol_Change'] = df['Volume'].pct_change(1)
-
-    df['NextRet'] = df['Close'].pct_change().shift(-1)           # naalaiku return (last row NaN)
+    df['NextRet'] = df['Close'].pct_change().shift(-1)
     df['Target'] = (df['NextRet'] > 0).astype(float).where(df['NextRet'].notna())
-
     df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.dropna(subset=feature_cols)                          # Target NaN irundhaalum last row irukkum
+    df = df.dropna(subset=feature_cols)
     df['Vol_Change'] = df['Vol_Change'].clip(-5, 5)
     return df
 
-
 # ------------------------------------------------
-# 3. MODEL RUNNER (cached)
+# 3. MODEL RUNNER
 # ------------------------------------------------
 def _run_lstm(Xtr, ytr, Xte, yte, X_latest_hist, n_feat, seq_len=60):
     from tensorflow.keras.models import Sequential
     from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
     import tensorflow as tf
     tf.random.set_seed(42)
-
-    scaler = StandardScaler().fit(Xtr)                           # train la mattum fit
+    scaler = StandardScaler().fit(Xtr)
     Xtr_s, Xte_s = scaler.transform(Xtr), scaler.transform(Xte)
     hist_s = scaler.transform(X_latest_hist)
 
@@ -164,7 +137,7 @@ def _run_lstm(Xtr, ytr, Xte, yte, X_latest_hist, n_feat, seq_len=60):
         return np.array(xs), np.array(ys)
 
     Xs_tr, ys_tr = seqs(Xtr_s, ytr)
-    Xs_te, ys_te = seqs(Xte_s, yte, prev=Xtr_s[-seq_len:])       # test ku train kadaisi 60 days context
+    Xs_te, ys_te = seqs(Xte_s, yte, prev=Xtr_s[-seq_len:])
     model = Sequential([
         Input(shape=(seq_len, n_feat)),
         LSTM(32, return_sequences=True), Dropout(0.2),
@@ -176,7 +149,6 @@ def _run_lstm(Xtr, ytr, Xte, yte, X_latest_hist, n_feat, seq_len=60):
     prob = float(model.predict(hist_s[-seq_len:].reshape(1, seq_len, n_feat), verbose=0)[0][0])
     return prob, acc
 
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def run_model(symbol, model_name, years):
     try:
@@ -185,17 +157,15 @@ def run_model(symbol, model_name, years):
             return {"error": "Data kammi / download aagala"}
         df = make_features(raw)
         train_df = df.dropna(subset=['Target'])
-        latest = df.iloc[[-1]]                                    # NAALAIKU PREDICTION ROW
+        latest = df.iloc[[-1]]
         X = train_df[feature_cols].values
         y = train_df['Target'].astype(int).values
         X_latest = latest[feature_cols].values
         split = int(len(X) * 0.8)
         Xtr, Xte, ytr, yte = X[:split], X[split:], y[:split], y[split:]
-
-        # Baselines
         majority = int(ytr.mean() >= 0.5)
         base_acc = float((yte == majority).mean())
-        naive_test_pred = (Xte[:, 0] > 0).astype(int)             # Return_1d > 0 => Up
+        naive_test_pred = (Xte[:, 0] > 0).astype(int)
         naive_acc = float((naive_test_pred == yte).mean())
 
         if model_name == MODEL_NAMES[0]:
@@ -220,10 +190,10 @@ def run_model(symbol, model_name, years):
         else:
             if not LSTM_AVAILABLE:
                 return {"error": "TensorFlow install illa"}
-            hist = np.vstack([Xtr, Xte])
+            # FIX: LSTM-ku latest row-um serthu anuppurom
+            hist = np.vstack([Xtr, Xte, X_latest])
             prob, acc = _run_lstm(Xtr, ytr, Xte, yte, hist, len(feature_cols))
 
-        # Historical average move (train data) -> expected return (honest estimate)
         nr = train_df['NextRet'].values[:split]
         avg_up = float(nr[nr > 0].mean()) if (nr > 0).any() else 0.0
         avg_dn = float(nr[nr <= 0].mean()) if (nr <= 0).any() else 0.0
@@ -241,7 +211,6 @@ def run_model(symbol, model_name, years):
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
 
-
 # ------------------------------------------------
 # 4. SIDEBAR
 # ------------------------------------------------
@@ -249,14 +218,12 @@ st.sidebar.title("⚙️ Settings")
 model_choice = st.sidebar.selectbox("Model Selection", MODEL_NAMES, index=2)
 budget = st.sidebar.number_input("Amount (Rs)", min_value=1000, max_value=1_000_000, value=10000, step=1000)
 st.sidebar.markdown("**Charges (Delivery trade)** - un broker contract note paathu maathunga")
-brokerage = st.sidebar.number_input("Brokerage per Order (Rs)", min_value=0.0, max_value=500.0, value=0.0, step=1.0,
-                                    help="Zerodha delivery = 0. Groww/Upstox/Angel la irukkalaam. Buy ku oru order, Sell ku oru order.")
+brokerage = st.sidebar.number_input("Brokerage per Order (Rs)", min_value=0.0, max_value=500.0, value=0.0, step=1.0)
 stt_pct = st.sidebar.number_input("STT % (buy + sell rendu side)", min_value=0.0, max_value=1.0, value=0.100, step=0.005, format="%.3f")
 stamp_pct = st.sidebar.number_input("Stamp duty % (buy side mattum)", min_value=0.0, max_value=1.0, value=0.015, step=0.001, format="%.3f")
 exch_pct = st.sidebar.number_input("Exchange txn charge % (NSE, approx)", min_value=0.0, max_value=1.0, value=0.003, step=0.0005, format="%.4f")
 sebi_pct = st.sidebar.number_input("SEBI fee %", min_value=0.0, max_value=1.0, value=0.0001, step=0.0001, format="%.4f")
-dp_charge = st.sidebar.number_input("DP charge per stock SOLD (Rs, GST serthu)", min_value=0.0, max_value=100.0, value=15.93, step=0.5,
-                                    help="Zerodha approx 13.5 + 18% GST = 15.93. Broker-ku maarum.")
+dp_charge = st.sidebar.number_input("DP charge per stock SOLD (Rs, GST serthu)", min_value=0.0, max_value=100.0, value=15.93, step=0.5)
 top_n = st.sidebar.slider("Max stocks in portfolio", 1, 10, 5)
 only_edge = st.sidebar.checkbox("Baseline ah beat panna models mattum", value=False)
 sector_choice = st.sidebar.selectbox("Sector Filter", ["All Sectors"] + sectors)
@@ -266,14 +233,14 @@ if not LSTM_AVAILABLE:
     st.sidebar.warning("TensorFlow illa - LSTM work aagadhu.")
 
 # ------------------------------------------------
-# 5. HEADER / TICKER
+# 5. HEADER / TICKER - SCROLLING FIX
 # ------------------------------------------------
 st.title("📈 Nifty-XAI - Education Project")
 ticker_html = ""
 for sym in ["RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "TCS.NS", "ITC.NS", "SBIN.NS", "LT.NS", "TITAN.NS"]:
     p, ch = get_last_close(sym)
     ticker_html += f"<span>{'🟢' if ch >= 0 else '🔴'} {nifty_50_sector[sym][0]} ₹{p:.2f} ({ch:+.2f}%)</span>"
-st.markdown(f'<div class="ticker">{ticker_html}</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="ticker"><marquee behavior="scroll" scrollamount="6" scrolldelay="20">{ticker_html}</marquee></div>', unsafe_allow_html=True)
 st.caption("Prices = last close (live illa). Prediction = next trading day Up/Down probability.")
 
 filtered = {k: v for k, v in nifty_50_sector.items() if sector_choice == "All Sectors" or v[1] == sector_choice}
@@ -311,7 +278,6 @@ if st.session_state.get('errors'):
 
 if 'res' in st.session_state and len(st.session_state['res']) > 0:
     df_res = st.session_state['res']
-
     st.subheader("Sector Wise Average")
     sec_avg = (df_res.groupby("Sector")
                .agg(Avg_Up_Prob=("Up Probability %", "mean"), Avg_Edge=("Edge %", "mean"), Companies=("Company", "count"))
@@ -319,7 +285,6 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
     st.dataframe(sec_avg.style.format({"Avg_Up_Prob": "{:.1f}%", "Avg_Edge": "{:+.1f}%", "Companies": "{:.0f}"}))
     st.bar_chart(sec_avg["Avg_Up_Prob"])
     st.caption("Edge % = model accuracy - best baseline accuracy. Edge ~0 or negative na model-ku value illa.")
-
     st.subheader("Company List")
     st.dataframe(df_res.sort_values("Up Probability %", ascending=False).style.format({
         "Last Close": "₹{:.2f}", "Up Probability %": "{:.1f}%", "Test Accuracy %": "{:.1f}%",
@@ -355,7 +320,7 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
         for _, r in cand.iterrows():
             qty = int(per_stock // r["Last Close"])
             if qty == 0:
-                continue                                           # budget thaandi vaanga maatom
+                continue
             buy_val = qty * r["Last Close"]
             exp_sell_val = buy_val * (1 + r["Expected Return %"] / 100)
             bc, sc = charges(buy_val, "buy"), charges(exp_sell_val, "sell")
@@ -371,12 +336,10 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
             pf["Net P/L"] = pf["Gross P/L"] - pf["Buy Charges"] - pf["Sell Charges"]
             st.dataframe(pf.style.format({c: "₹{:.2f}" for c in pf.columns if c not in ["Company", "Qty"]}),
                          use_container_width=True)
-
             invested = pf["Invested"].sum()
             buy_ch, sell_ch = pf["Buy Charges"].sum(), pf["Sell Charges"].sum()
             cash_left = budget - invested - buy_ch
             gross, net = pf["Gross P/L"].sum(), pf["Net P/L"].sum()
-
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Invested", f"₹{invested:.2f}")
             c2.metric("Cash Left (after buy charges)", f"₹{cash_left:.2f}")

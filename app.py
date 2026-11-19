@@ -291,14 +291,12 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
         "Last Close": "₹{:.2f}", "Up Probability %": "{:.1f}%", "Test Accuracy %": "{:.1f}%",
         "Baseline Acc %": "{:.1f}%", "Edge %": "{:+.1f}%", "Expected Return %": "{:+.3f}%", "RSI": "{:.1f}"}),
         use_container_width=True)
-
     st.divider()
-    st.subheader(f"💰 Rs {budget:,} Portfolio Simulation (1-day hold)")
-  cand = df_res[(df_res["Up Probability %"] > 50) & (df_res["Expected Return %"] > 0) & (df_res["Last Close"].notna()) & (df_res["Last Close"] > 0)]
+        st.subheader(f"💰 Rs {budget:,} Portfolio Simulation (1-day hold)")
+    cand = df_res[(df_res["Up Probability %"] > 50) & (df_res["Expected Return %"] > 0) & (df_res["Last Close"].notna()) & (df_res["Last Close"] > 0)]
     if only_edge:
         cand = cand[cand["Edge %"] > 0]
     cand = cand.sort_values("Up Probability %", ascending=False).head(top_n)
-
     def charges(value, side):
         exch = value * (exch_pct + sebi_pct) / 100
         return {

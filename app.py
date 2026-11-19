@@ -294,7 +294,7 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
 
     st.divider()
     st.subheader(f"💰 Rs {budget:,} Portfolio Simulation (1-day hold)")
-    cand = df_res[(df_res["Up Probability %"] > 50) & (df_res["Expected Return %"] > 0)]
+  cand = df_res[(df_res["Up Probability %"] > 50) & (df_res["Expected Return %"] > 0) & (df_res["Last Close"].notna()) & (df_res["Last Close"] > 0)]
     if only_edge:
         cand = cand[cand["Edge %"] > 0]
     cand = cand.sort_values("Up Probability %", ascending=False).head(top_n)

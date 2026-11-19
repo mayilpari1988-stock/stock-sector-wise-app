@@ -316,9 +316,12 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
         per_stock = budget / len(cand)
         rows, parts = [], []
         for _, r in cand.iterrows():
-            qty = int(per_stock // r["Last Close"])
-            if qty == 0:
-                continue
+    price = float(r["Last Close"])
+    if not np.isfinite(price) or price <= 0:
+        continue
+    qty = int(per_stock // price)
+    if qty == 0:
+        continue
             buy_val = qty * r["Last Close"]
             exp_sell_val = buy_val * (1 + r["Expected Return %"] / 100)
             bc, sc = charges(buy_val, "buy"), charges(exp_sell_val, "sell")

@@ -184,11 +184,8 @@ budget = st.sidebar.number_input(
     help="Ungaloda total budget. Eg: 10000"
 )
 
-trans_cost_per_trade = st.sidebar.number_input(
-    "Transaction Cost per Trade (Rs)",
-    min_value=0.0, max_value=500.0, value=20.0, step=5.0,
-    help="Oru trade ku Brokerage + GST + STT serthu evalo? Eg: 20 Rs"
-)
+# Delivery - Brokerage Free, adhunaala cost 0
+trans_cost_per_trade = 0.0
 
 sector_choice = st.sidebar.selectbox("Sector Filter", ["All Sectors"] + sectors)
 

@@ -197,6 +197,7 @@ def run_model(symbol, model_name, years):
         avg_up = float(nr[nr > 0].mean()) if (nr > 0).any() else 0.0
         avg_dn = float(nr[nr <= 0].mean()) if (nr <= 0).any() else 0.0
         exp_ret = prob * avg_up + (1 - prob) * avg_dn
+
         return {
             "price": float(raw['Close'].iloc[-1]),
             "date": str(raw.index[-1].date()),
@@ -229,6 +230,12 @@ sebi_pct = st.sidebar.number_input("SEBI fee %", min_value=0.0, max_value=1.0, v
 dp_charge = st.sidebar.number_input("DP charge per stock SOLD (Rs, GST serthu)", min_value=0.0, max_value=100.0, value=15.93, step=0.5)
 top_n = st.sidebar.slider("Max stocks in portfolio", 1, 10, 5)
 only_edge = st.sidebar.checkbox("Baseline ah beat panna models mattum", value=False)
+sector_choice = st.sidebar.selectbox("Sector Filter", ["All Sectors"] + sectors)
+years = st.sidebar.slider("Data years", 3, 10, 5)
+
+# FILTER - ORU THADAVA MATTUM, INGA THAAN MA
+filtered = {k: v for k, v in nifty_50_sector.items() if sector_choice == "All Sectors" or v[1] == sector_choice}
+
 # ------------------------------------------------
 # 5. HEADER / TICKER - SCROLLING
 # ------------------------------------------------
@@ -239,6 +246,7 @@ for sym in ["RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "TCS.NS", "ITC.NS", "SBIN.N
     ticker_html += f"<span>{'🟢' if ch >= 0 else '🔴'} {nifty_50_sector[sym][0]} ₹{p:.2f} ({ch:+.2f}%)</span>"
 st.markdown(f'<div class="ticker"><marquee behavior="scroll" scrollamount="6" scrolldelay="20">{ticker_html}</marquee></div>', unsafe_allow_html=True)
 st.caption("Prices = last close (live illa). Prediction = next trading day Up/Down probability.")
+
 # ------------------------------------------------
 # 6. PREDICTION
 # ------------------------------------------------

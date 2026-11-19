@@ -1,3 +1,8 @@
+# Nifty-XAI - SIMPLE SIDEBAR VERSION
+# Sidebar la mattum: Model Selection + Amount + Transaction Cost per Trade
+# Models: 1. Naive 2. Logistic 3. XGBoost 4. LSTM
+# Run: streamlit run app.py
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -161,7 +166,7 @@ def predict_one_company(symbol, model_name, years=5):
         return None
 
 # ------------------------------------------------
-# 3. SIDEBAR - NE KETTA 3 MATTUM DHAN
+# 3. SIDEBAR
 # ------------------------------------------------
 
 st.sidebar.title("⚙️ Settings")
@@ -179,14 +184,13 @@ budget = st.sidebar.number_input(
     help="Ungaloda total budget. Eg: 10000"
 )
 
-# Delivery - Brokerage Free, adhunaala cost 0
 trans_cost_per_trade = 0.0
 
 sector_choice = st.sidebar.selectbox("Sector Filter", ["All Sectors"] + sectors)
 
 st.sidebar.divider()
 st.sidebar.caption("Model: Naive = Baseline, Logistic/XGBoost = ML, LSTM = Deep Learning")
-st.sidebar.caption("Cost: Ne potta cost ah vechu dhan Net Profit calculate aagum.")
+st.sidebar.caption("Cost: STT 0.1% mattum. Delivery-la Brokerage Free.")
 
 # ------------------------------------------------
 # 4. MAIN PAGE - TOP TICKER
@@ -200,10 +204,10 @@ for sym in ["RELIANCE.NS","HDFCBANK.NS","INFY.NS","TCS.NS","ITC.NS","SBIN.NS","I
     emoji = "🟢" if ch >= 0 else "🔴"
     ticker_text += f"<span>{emoji} {name} ₹{p:.2f} ({ch:+.2f}%)</span>"
 st.markdown(f'<div class="ticker"><marquee behavior="scroll" scrollamount="6">{ticker_text}</marquee></div>', unsafe_allow_html=True)
-st.caption(f"Selected: Model = {model_choice} | Budget = ₹{budget} | Cost per Trade = ₹{trans_cost_per_trade} | Sector = {sector_choice}")
+st.caption(f"Selected: Model = {model_choice} | Budget = ₹{budget} | STT = 0.1% | Sector = {sector_choice}")
 
 # ------------------------------------------------
-# 5. SECTOR WISE PREDICTION - UN CODE ADHE, ONNUM MAATHALA
+# 5. SECTOR WISE PREDICTION
 # ------------------------------------------------
 
 st.subheader(f"📊 Sector Wise Prediction - {model_choice}")
@@ -253,91 +257,56 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
         st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown('<div class="charges-box">', unsafe_allow_html=True)
-        st.markdown('<div class="charges-box">', unsafe_allow_html=True)
-st.subheader("🧾 Charges + Amount in Hand")
-num_trades = len(port_df)
-
-# --- Delivery - Brokerage Free ---
-trans_cost_per_trade = 0.0
-brokerage_part = 0.0
-gst_part = 0.0
-
-# --- STT mattum - Amount mela 0.1% ---
-stt = 0.1 / 100 * total_invested
-total_cost = stt
-
-amount_in_hand = budget - total_invested - total_cost
-gross_profit = total_expected - total_invested
-net_profit = gross_profit - total_cost
-net_pct = (net_profit / total_invested * 100) if total_invested > 0 else 0
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Total Invested", f"₹{total_invested:.2f}")
-c1.metric("No. of Trades", f"{num_trades}")
-c2.metric("STT (0.1%)", f"₹{stt:.2f}")
-c2.metric("Amount in Hand (Cash Left)", f"₹{amount_in_hand:.2f}")
-c3.metric("Total Cost", f"₹{total_cost:.2f}")
-c3.metric("Net Profit %", f"{net_pct:.2f}%")
-st.divider()
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("💰 Budget", f"₹{budget:.2f}")
-col2.metric("💸 Amount in Hand", f"₹{amount_in_hand:.2f}")
-col3.metric("📈 Gross Profit", f"₹{gross_profit:.2f}")
-col4.metric("🏆 Net Profit (After STT)", f"₹{net_profit:.2f}", f"{net_pct:.2f}%")
-st.caption(f"Formula: Net Profit = Expected Value - Invested - STT (0.1% x Invested). Delivery-la Brokerage Free.")
-st.markdown('</div>', unsafe_allow_html=True)
+        st.subheader("🧾 Charges + Amount in Hand")
         num_trades = len(port_df)
-        total_trans_cost = trans_cost_per_trade * num_trades
-        gst_part = total_trans_cost * 18 / 118
-        brokerage_part = total_trans_cost - gst_part
-        amount_in_hand = budget - total_invested - total_trans_cost
+        trans_cost_per_trade = 0.0
+        brokerage_part = 0.0
+        gst_part = 0.0
+        stt = 0.1 / 100 * total_invested
+        total_cost = stt
+        amount_in_hand = budget - total_invested - total_cost
         gross_profit = total_expected - total_invested
-        net_profit = gross_profit - total_trans_cost
+        net_profit = gross_profit - total_cost
         net_pct = (net_profit / total_invested * 100) if total_invested > 0 else 0
-
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Invested", f"₹{total_invested:.2f}")
         c1.metric("No. of Trades", f"{num_trades}")
-        c2.metric(f"Transaction Cost ({num_trades} x ₹{trans_cost_per_trade})", f"₹{total_trans_cost:.2f}")
-        c2.metric("Adhula GST (18%) Approx", f"₹{gst_part:.2f}")
-        c3.metric("Brokerage + Others", f"₹{brokerage_part:.2f}")
-        c3.metric("Amount in Hand (Cash Left)", f"₹{amount_in_hand:.2f}")
+        c2.metric("STT (0.1%)", f"₹{stt:.2f}")
+        c2.metric("Amount in Hand (Cash Left)", f"₹{amount_in_hand:.2f}")
+        c3.metric("Total Cost", f"₹{total_cost:.2f}")
+        c3.metric("Net Profit %", f"{net_pct:.2f}%")
         st.divider()
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("💰 Budget", f"₹{budget:.2f}")
         col2.metric("💸 Amount in Hand", f"₹{amount_in_hand:.2f}")
         col3.metric("📈 Gross Profit", f"₹{gross_profit:.2f}")
-        col4.metric("🏆 Net Profit (After Cost)", f"₹{net_profit:.2f}", f"{net_pct:.2f}%")
-        st.caption(f"Formula: Net Profit = Expected Value - Invested - (Transaction Cost per Trade ₹{trans_cost_per_trade} x {num_trades} Trades). GST indha cost kulla included.")
+        col4.metric("🏆 Net Profit (After STT)", f"₹{net_profit:.2f}", f"{net_pct:.2f}%")
+        st.caption(f"Formula: Net Profit = Expected Value - Invested - STT (0.1% x Invested). Delivery-la Brokerage Free.")
         st.markdown('</div>', unsafe_allow_html=True)
         st.warning("⚠️ Education ku mattum. Model 100% correct illa, loss um varalam.")
 else:
     st.info("👈 Left sidebar la Model, Amount, Cost ah maathi, mela Run Prediction ah click pannu.")
 
 # ================================================================
-# EXTRA ADD ONLY - KEELA MATTUM - UN CODE AH MODIFY PANNALA
+# EXTRA ADD ONLY - KEELA MATTUM
 # 4 MODEL ODA PREDICTION AH TABLE FORMAT LA KAAMIKKA
 # ================================================================
 
 st.divider()
 st.subheader("📊 Extra Table - 4 Model Comparison - Sector Wise")
-st.caption(f"Sector: {sector_choice} - Keela button ah click panna, andha sector oda yalla company ku 4 model oda prediction um table la varum. Mela irukura code ah onnum thodala.")
+st.caption(f"Sector: {sector_choice} - Keela button ah click panna, andha sector oda yalla company ku 4 model oda prediction um table la varum.")
 
-# Extra function - 4 model um orae vaati run pannum - Un predict_one_company ah reuse pannudhu, modify pannala
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_4model_table(sector_filter):
     filtered_extra = {k: v for k, v in nifty_50_sector.items() if sector_filter == "All Sectors" or v[1] == sector_filter}
     rows_extra = []
     for sym_extra, (name_extra, sec_extra) in filtered_extra.items():
-        # Un function ah 4 vaati call pannurom - 4 model ku
         r1 = predict_one_company(sym_extra, "1. Naive", years=2)
         r2 = predict_one_company(sym_extra, "2. Logistic Regression", years=2)
         r3 = predict_one_company(sym_extra, "3. XGBoost", years=2)
-        # LSTM slow na, idha mattum konjam fast ah - years=2, epochs already 10 dhan
         r4 = predict_one_company(sym_extra, "4. LSTM (Deep Learning)", years=2)
         if r1 and r2 and r3:
             price_extra = r1["price"]
-            # LSTM kedaikala na 0 nu podurom
             lstm_prob_extra = r4["prob"]*100 if r4 else 0
             lstm_acc_extra = r4["acc"]*100 if r4 else 0
             rows_extra.append({
@@ -380,7 +349,6 @@ if 'df_4model_extra' in st.session_state and len(st.session_state['df_4model_ext
         }),
         use_container_width=True
     )
-    # Chinna summary - Average Accuracy
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("1. Naive Avg Acc", f"{df_show_extra['1. Naive Acc %'].mean():.2f}%")
     c2.metric("2. Logistic Avg Acc", f"{df_show_extra['2. Logistic Acc %'].mean():.2f}%")

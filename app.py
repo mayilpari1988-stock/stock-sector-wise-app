@@ -230,7 +230,7 @@ sebi_pct = st.sidebar.number_input("SEBI fee %", min_value=0.0, max_value=1.0, v
 dp_charge = st.sidebar.number_input("DP charge per stock SOLD (Rs, GST serthu)", min_value=0.0, max_value=100.0, value=15.93, step=0.5)
 top_n = st.sidebar.slider("Max stocks in portfolio", 1, 10, 5)
 only_edge = st.sidebar.checkbox("Baseline ah beat panna models mattum", value=False)
-sector_choice = st.sidebar.selectbox("Sector Filter", ["All Sectors"] + sectors)
+filtered = {k: v for k, v in nifty_50_sector.items() if sector_choice == "All Sectors" or v[1] == sector_choice}
 years = st.sidebar.slider("Data years", 3, 10, 5)
 
 # ------------------------------------------------

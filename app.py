@@ -1,8 +1,3 @@
-# Nifty-XAI - SIMPLE SIDEBAR VERSION
-# Sidebar la mattum: Model Selection + Amount + Transaction Cost per Trade
-# Models: 1. Naive 2. Logistic 3. XGBoost 4. LSTM
-# Run: streamlit run app.py
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -258,7 +253,39 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
         st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown('<div class="charges-box">', unsafe_allow_html=True)
-        st.subheader("🧾 Transaction Cost + GST + Amount in Hand")
+        st.markdown('<div class="charges-box">', unsafe_allow_html=True)
+st.subheader("🧾 Charges + Amount in Hand")
+num_trades = len(port_df)
+
+# --- Delivery - Brokerage Free ---
+trans_cost_per_trade = 0.0
+brokerage_part = 0.0
+gst_part = 0.0
+
+# --- STT mattum - Amount mela 0.1% ---
+stt = 0.1 / 100 * total_invested
+total_cost = stt
+
+amount_in_hand = budget - total_invested - total_cost
+gross_profit = total_expected - total_invested
+net_profit = gross_profit - total_cost
+net_pct = (net_profit / total_invested * 100) if total_invested > 0 else 0
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Total Invested", f"₹{total_invested:.2f}")
+c1.metric("No. of Trades", f"{num_trades}")
+c2.metric("STT (0.1%)", f"₹{stt:.2f}")
+c2.metric("Amount in Hand (Cash Left)", f"₹{amount_in_hand:.2f}")
+c3.metric("Total Cost", f"₹{total_cost:.2f}")
+c3.metric("Net Profit %", f"{net_pct:.2f}%")
+st.divider()
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("💰 Budget", f"₹{budget:.2f}")
+col2.metric("💸 Amount in Hand", f"₹{amount_in_hand:.2f}")
+col3.metric("📈 Gross Profit", f"₹{gross_profit:.2f}")
+col4.metric("🏆 Net Profit (After STT)", f"₹{net_profit:.2f}", f"{net_pct:.2f}%")
+st.caption(f"Formula: Net Profit = Expected Value - Invested - STT (0.1% x Invested). Delivery-la Brokerage Free.")
+st.markdown('</div>', unsafe_allow_html=True)
         num_trades = len(port_df)
         total_trans_cost = trans_cost_per_trade * num_trades
         gst_part = total_trans_cost * 18 / 118

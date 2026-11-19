@@ -1,43 +1,48 @@
-# Nifty-XAI - SIMPLE SIDEBAR VERSION
-# Sidebar la mattum: Model Selection + Amount + Transaction Cost per Trade
-# Models: 1. Naive 2. Logistic 3. XGBoost 4. LSTM
+# Nifty-XAI (Fixed Version) - Education purpose only
 # Run: streamlit run app.py
+#
+# requirements.txt:
+#   streamlit
+#   yfinance
+#   pandas
+#   numpy
+#   scikit-learn
+#   xgboost
+#   tensorflow-cpu   (optional - LSTM venumna mattum)
+#
+# FIXES vs old code:
+#  1. Prediction ippo LATEST day features la irundhu (naalaiku) - dhaan. Munna yesterday features use aagudhu.
+#  2. Scaler train data la mattum fit (LSTM leakage fix).
+#  3. Fake "Expected Price" (prob*1.2%) remove. Ippo historical avg up/down move vachi expected return.
+#  4. Buy + Sell rendu side charges. GST brokerage mela mattum. Other charges (STT etc.) % la.
+#  5. Budget thaandi vaanga maatom (qty=0 na skip).
+#  6. Accuracy ku baseline (majority class + naive) comparison, edge kaattum.
+#  7. LSTM illa na NaN (0 illa). Errors maraikkama kaattum.
+#  8. Data cache, 4-model table progress bar, LSTM optional.
 
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import numpy as np
 import warnings
 warnings.filterwarnings("ignore")
 
+import numpy as np
+import pandas as pd
+import streamlit as st
+import yfinance as yf
+import xgboost as xgb
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score
-import xgboost as xgb
-
-try:
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    LSTM_AVAILABLE = True
-except:
-    LSTM_AVAILABLE = False
 
 st.set_page_config(page_title="Nifty-XAI", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
-.main {background-color: #f8f9fa;}
-.ticker {background-color: #1a237e; color: white; padding: 10px; border-radius: 8px; font-weight: bold; font-size: 15px;}
-.ticker span {margin-right: 30px;}
-.portfolio-box {background-color: #e8f5e9; padding: 20px; border-radius: 10px; border: 2px solid #2e7d32;}
-.charges-box {background-color: #fff3e0; padding: 20px; border-radius: 10px; border: 2px solid #ef6c00;}
+.ticker {background-color:#1a237e;color:white;padding:10px;border-radius:8px;font-weight:bold;font-size:14px;overflow-x:auto;white-space:nowrap;}
+.ticker span {margin-right:28px;}
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------
-# 1. NIFTY 50 + SECTOR
+# 1. STOCK LIST (Nifty 50 constituents maaralaam - NSE site la verify pannunga)
 # ------------------------------------------------
-
 nifty_50_sector = {
     "HDFCBANK.NS": ("HDFC Bank", "Banking"), "ICICIBANK.NS": ("ICICI Bank", "Banking"),
     "SBIN.NS": ("SBI", "Banking"), "AXISBANK.NS": ("Axis Bank", "Banking"),
@@ -66,301 +71,352 @@ nifty_50_sector = {
     "ETERNAL.NS": ("Eternal (Zomato)", "Consumer"), "INDIGO.NS": ("IndiGo", "Aviation"),
     "TRENT.NS": ("Trent", "Retail"),
 }
-sectors = sorted(list(set(v[1] for v in nifty_50_sector.values())))
+sectors = sorted(set(v[1] for v in nifty_50_sector.values()))
+
+MODEL_NAMES = ["1. Naive", "2. Logistic Regression", "3. XGBoost", "4. LSTM (Deep Learning)"]
+
+try:
+    import tensorflow  # noqa: F401
+    LSTM_AVAILABLE = True
+except Exception:
+    LSTM_AVAILABLE = False
 
 # ------------------------------------------------
-# 2. FEATURES - UN CODE ADHE
+# 2. DATA + FEATURES
 # ------------------------------------------------
+feature_cols = ['Return_1d', 'Return_5d', 'Return_10d', 'Return_20d',
+                'MA_Ratio_5_20', 'MA_Ratio_20_50', 'Price_vs_MA20',
+                'Vol_10', 'Vol_20', 'RSI', 'Vol_Change']
 
-def make_features(df):
-    df = df.copy()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_data(symbol, years):
+    df = yf.download(symbol, period=f"{years}y", progress=False, auto_adjust=True)
+    if df is None or df.empty:
+        return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_last_close(symbol):
+    try:
+        h = yf.Ticker(symbol).history(period="5d")
+        if len(h) >= 2:
+            curr, prev = float(h['Close'].iloc[-1]), float(h['Close'].iloc[-2])
+            return curr, (curr - prev) / prev * 100
+    except Exception:
+        pass
+    return 0.0, 0.0
+
+
+def make_features(raw):
+    """Latest row ah DROP pannala. Latest row = naalaiku prediction ku. Target adhukku NaN."""
+    df = raw.copy()
     df['Return_1d'] = df['Close'].pct_change(1)
     df['Return_5d'] = df['Close'].pct_change(5)
     df['Return_10d'] = df['Close'].pct_change(10)
     df['Return_20d'] = df['Close'].pct_change(20)
-    df['MA_5'] = df['Close'].rolling(5).mean()
-    df['MA_20'] = df['Close'].rolling(20).mean()
-    df['MA_50'] = df['Close'].rolling(50).mean()
-    df['MA_Ratio_5_20'] = df['MA_5'] / df['MA_20']
-    df['MA_Ratio_20_50'] = df['MA_20'] / df['MA_50']
-    df['Price_vs_MA20'] = df['Close'] / df['MA_20'] - 1
+    ma5 = df['Close'].rolling(5).mean()
+    ma20 = df['Close'].rolling(20).mean()
+    ma50 = df['Close'].rolling(50).mean()
+    df['MA_Ratio_5_20'] = ma5 / ma20
+    df['MA_Ratio_20_50'] = ma20 / ma50
+    df['Price_vs_MA20'] = df['Close'] / ma20 - 1
     df['Vol_10'] = df['Return_1d'].rolling(10).std()
     df['Vol_20'] = df['Return_1d'].rolling(20).std()
     delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    loss = loss.replace(0, 1e-10)
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    df['RSI'] = df['RSI'].clip(0, 100)
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean().replace(0, 1e-10)
+    df['RSI'] = (100 - 100 / (1 + gain / loss)).clip(0, 100)
     df['Vol_Change'] = df['Volume'].pct_change(1)
-    df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+
+    df['NextRet'] = df['Close'].pct_change().shift(-1)           # naalaiku return (last row NaN)
+    df['Target'] = (df['NextRet'] > 0).astype(float).where(df['NextRet'].notna())
+
     df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.dropna()
-    df = df.iloc[:-1]
+    df = df.dropna(subset=feature_cols)                          # Target NaN irundhaalum last row irukkum
+    df['Vol_Change'] = df['Vol_Change'].clip(-5, 5)
     return df
 
-feature_cols = ['Return_1d','Return_5d','Return_10d','Return_20d','MA_Ratio_5_20','MA_Ratio_20_50','Price_vs_MA20','Vol_10','Vol_20','RSI','Vol_Change']
-
-@st.cache_data(ttl=300)
-def get_live_price(symbol):
-    try:
-        h = yf.Ticker(symbol).history(period="2d")
-        if len(h) >= 2:
-            curr = float(h['Close'].iloc[-1]); prev = float(h['Close'].iloc[-2])
-            return curr, (curr-prev)/prev*100
-        return 0, 0
-    except:
-        return 0, 0
-
-def predict_one_company(symbol, model_name, years=5):
-    try:
-        df_raw = yf.download(symbol, period=f"{years}y", progress=False, auto_adjust=True)
-        if df_raw.empty or len(df_raw) < 200:
-            return None
-        if isinstance(df_raw.columns, pd.MultiIndex):
-            df_raw.columns = df_raw.columns.get_level_values(0)
-        df = make_features(df_raw)
-        X = df[feature_cols].values; y = df['Target'].values
-        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0); X = np.clip(X, -1e6, 1e6)
-        split = int(len(df)*0.8)
-        X_train, X_test = X[:split], X[split:]; y_train, y_test = y[:split], y[split:]
-        scaler = StandardScaler()
-        X_train_s = scaler.fit_transform(X_train); X_test_s = scaler.transform(X_test)
-        last_price = float(df_raw['Close'].iloc[-1])
-        last_row = X[-1:].reshape(1, -1); last_row_s = scaler.transform(last_row)
-        prob_up = 0.5; acc = 0
-        if model_name == "1. Naive":
-            prob_up = 0.55 if df['Return_1d'].iloc[-1] > 0 else 0.45
-            pred = (df['Return_1d'].values[split:] > 0).astype(int); acc = accuracy_score(y_test, pred)
-        elif model_name == "2. Logistic Regression":
-            m = LogisticRegression(max_iter=1000); m.fit(X_train_s, y_train)
-            prob_up = float(m.predict_proba(last_row_s)[0][1]); acc = accuracy_score(y_test, m.predict(X_test_s))
-        elif model_name == "3. XGBoost":
-            m = xgb.XGBClassifier(n_estimators=200, max_depth=5, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8, eval_metric='logloss', random_state=42)
-            m.fit(X_train, y_train); prob_up = float(m.predict_proba(last_row)[0][1]); acc = accuracy_score(y_test, m.predict(X_test))
-        elif model_name == "4. LSTM (Deep Learning)":
-            if not LSTM_AVAILABLE: return None
-            SEQ_LEN = 60
-            X_all = scaler.fit_transform(X); X_all = np.nan_to_num(X_all, nan=0.0, posinf=0.0, neginf=0.0)
-            def create_seq(data, labels):
-                Xs, ys = [], []
-                for i in range(SEQ_LEN, len(data)):
-                    Xs.append(data[i-SEQ_LEN:i]); ys.append(labels[i])
-                return np.array(Xs), np.array(ys)
-            X_seq, y_seq = create_seq(X_all, y); s2 = int(len(X_seq)*0.8)
-            Xtr, Xte = X_seq[:s2], X_seq[s2:]; ytr, yte = y_seq[:s2], y_seq[s2:]
-            lm = Sequential([LSTM(50, return_sequences=True, input_shape=(SEQ_LEN, len(feature_cols))), Dropout(0.2), LSTM(50, return_sequences=False), Dropout(0.2), Dense(25, activation='relu'), Dense(1, activation='sigmoid')])
-            lm.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-            lm.fit(Xtr, ytr, epochs=10, batch_size=32, verbose=0, validation_split=0.1)
-            last_seq = X_all[-SEQ_LEN:].reshape(1, SEQ_LEN, len(feature_cols))
-            prob_up = float(lm.predict(last_seq, verbose=0)[0][0])
-            pred = (lm.predict(Xte, verbose=0) > 0.5).astype(int).flatten(); acc = accuracy_score(yte, pred)
-        pred_label = "Up 🟢" if prob_up > 0.5 else "Down 🔴"
-        exp_move_pct = (prob_up - 0.5) * 2 * 1.2
-        exp_price = last_price * (1 + exp_move_pct/100)
-        return {"price": last_price, "prob": prob_up, "pred": pred_label, "acc": acc, "exp_price": exp_price, "exp_move": exp_move_pct, "rsi": float(df['RSI'].iloc[-1])}
-    except:
-        return None
 
 # ------------------------------------------------
-# 3. SIDEBAR - NE KETTA 3 MATTUM DHAN
+# 3. MODEL RUNNER (cached)
 # ------------------------------------------------
+def _run_lstm(Xtr, ytr, Xte, yte, X_latest_hist, n_feat, seq_len=60):
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+    import tensorflow as tf
+    tf.random.set_seed(42)
 
+    scaler = StandardScaler().fit(Xtr)                           # train la mattum fit
+    Xtr_s, Xte_s = scaler.transform(Xtr), scaler.transform(Xte)
+    hist_s = scaler.transform(X_latest_hist)
+
+    def seqs(data, labels, prev=None):
+        if prev is not None:
+            data = np.vstack([prev, data])
+            labels = np.concatenate([np.zeros(len(prev)), labels])
+        xs, ys = [], []
+        for i in range(seq_len, len(data)):
+            xs.append(data[i - seq_len:i]); ys.append(labels[i])
+        return np.array(xs), np.array(ys)
+
+    Xs_tr, ys_tr = seqs(Xtr_s, ytr)
+    Xs_te, ys_te = seqs(Xte_s, yte, prev=Xtr_s[-seq_len:])       # test ku train kadaisi 60 days context
+    model = Sequential([
+        Input(shape=(seq_len, n_feat)),
+        LSTM(32, return_sequences=True), Dropout(0.2),
+        LSTM(32), Dropout(0.2),
+        Dense(16, activation='relu'), Dense(1, activation='sigmoid')])
+    model.compile(optimizer='adam', loss='binary_crossentropy')
+    model.fit(Xs_tr, ys_tr, epochs=8, batch_size=32, verbose=0, validation_split=0.1)
+    acc = float(((model.predict(Xs_te, verbose=0).flatten() > 0.5).astype(int) == ys_te).mean())
+    prob = float(model.predict(hist_s[-seq_len:].reshape(1, seq_len, n_feat), verbose=0)[0][0])
+    return prob, acc
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_model(symbol, model_name, years):
+    try:
+        raw = load_data(symbol, years)
+        if raw is None or len(raw) < 250:
+            return {"error": "Data kammi / download aagala"}
+        df = make_features(raw)
+        train_df = df.dropna(subset=['Target'])
+        latest = df.iloc[[-1]]                                    # NAALAIKU PREDICTION ROW
+        X = train_df[feature_cols].values
+        y = train_df['Target'].astype(int).values
+        X_latest = latest[feature_cols].values
+        split = int(len(X) * 0.8)
+        Xtr, Xte, ytr, yte = X[:split], X[split:], y[:split], y[split:]
+
+        # Baselines
+        majority = int(ytr.mean() >= 0.5)
+        base_acc = float((yte == majority).mean())
+        naive_test_pred = (Xte[:, 0] > 0).astype(int)             # Return_1d > 0 => Up
+        naive_acc = float((naive_test_pred == yte).mean())
+
+        if model_name == MODEL_NAMES[0]:
+            naive_train_pred = (Xtr[:, 0] > 0).astype(int)
+            up_mask = naive_train_pred == 1
+            p_up_given_up = ytr[up_mask].mean() if up_mask.any() else 0.5
+            p_up_given_dn = ytr[~up_mask].mean() if (~up_mask).any() else 0.5
+            prob = float(p_up_given_up if X_latest[0, 0] > 0 else p_up_given_dn)
+            acc = naive_acc
+        elif model_name == MODEL_NAMES[1]:
+            sc = StandardScaler().fit(Xtr)
+            m = LogisticRegression(max_iter=1000).fit(sc.transform(Xtr), ytr)
+            prob = float(m.predict_proba(sc.transform(X_latest))[0][1])
+            acc = float((m.predict(sc.transform(Xte)) == yte).mean())
+        elif model_name == MODEL_NAMES[2]:
+            m = xgb.XGBClassifier(n_estimators=150, max_depth=3, learning_rate=0.05,
+                                  subsample=0.8, colsample_bytree=0.8,
+                                  eval_metric='logloss', random_state=42)
+            m.fit(Xtr, ytr)
+            prob = float(m.predict_proba(X_latest)[0][1])
+            acc = float((m.predict(Xte) == yte).mean())
+        else:
+            if not LSTM_AVAILABLE:
+                return {"error": "TensorFlow install illa"}
+            hist = np.vstack([Xtr, Xte])
+            prob, acc = _run_lstm(Xtr, ytr, Xte, yte, hist, len(feature_cols))
+
+        # Historical average move (train data) -> expected return (honest estimate)
+        nr = train_df['NextRet'].values[:split]
+        avg_up = float(nr[nr > 0].mean()) if (nr > 0).any() else 0.0
+        avg_dn = float(nr[nr <= 0].mean()) if (nr <= 0).any() else 0.0
+        exp_ret = prob * avg_up + (1 - prob) * avg_dn
+
+        return {
+            "price": float(raw['Close'].iloc[-1]),
+            "date": str(raw.index[-1].date()),
+            "prob": prob, "acc": acc,
+            "base_acc": base_acc, "naive_acc": naive_acc,
+            "exp_ret_pct": exp_ret * 100,
+            "rsi": float(latest['RSI'].iloc[0]),
+            "n_test": int(len(yte)),
+        }
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+# ------------------------------------------------
+# 4. SIDEBAR
+# ------------------------------------------------
 st.sidebar.title("⚙️ Settings")
-st.sidebar.markdown("Idhula mattum maathunga, full website maariyidum.")
-
-model_choice = st.sidebar.selectbox(
-    "Model Selection",
-    ["1. Naive", "2. Logistic Regression", "3. XGBoost", "4. LSTM (Deep Learning)"],
-    index=2
-)
-
-budget = st.sidebar.number_input(
-    "Amount Enter (Rs)",
-    min_value=1000, max_value=1000000, value=10000, step=1000,
-    help="Ungaloda total budget. Eg: 10000"
-)
-
-trans_cost_per_trade = st.sidebar.number_input(
-    "Transaction Cost per Trade (Rs)",
-    min_value=0.0, max_value=500.0, value=20.0, step=5.0,
-    help="Oru trade ku Brokerage + GST + STT serthu evalo? Eg: 20 Rs"
-)
-
+model_choice = st.sidebar.selectbox("Model Selection", MODEL_NAMES, index=2)
+budget = st.sidebar.number_input("Amount (Rs)", min_value=1000, max_value=1_000_000, value=10000, step=1000)
+brokerage = st.sidebar.number_input("Brokerage per Order (Rs)", min_value=0.0, max_value=500.0, value=20.0, step=5.0,
+                                    help="Buy ku oru order, Sell ku oru order - rendu side um charge.")
+other_pct = st.sidebar.number_input("Other charges % (STT, stamp, exchange)", min_value=0.0, max_value=1.0,
+                                    value=0.12, step=0.01,
+                                    help="Approx. Delivery trade la STT 0.1% buy+sell. Un broker contract note paathu maathunga.")
+top_n = st.sidebar.slider("Max stocks in portfolio", 1, 10, 5)
+only_edge = st.sidebar.checkbox("Baseline ah beat panna models mattum", value=False)
 sector_choice = st.sidebar.selectbox("Sector Filter", ["All Sectors"] + sectors)
-
-st.sidebar.divider()
-st.sidebar.caption("Model: Naive = Baseline, Logistic/XGBoost = ML, LSTM = Deep Learning")
-st.sidebar.caption("Cost: Ne potta cost ah vechu dhan Net Profit calculate aagum.")
-
-# ------------------------------------------------
-# 4. MAIN PAGE - TOP TICKER
-# ------------------------------------------------
-
-st.title("📈 Nifty-XAI - Research Level")
-ticker_text = ""
-for sym in ["RELIANCE.NS","HDFCBANK.NS","INFY.NS","TCS.NS","ITC.NS","SBIN.NS","ICICIBANK.NS","LT.NS","TITAN.NS","BHARTIARTL.NS"]:
-    p, ch = get_live_price(sym)
-    name = nifty_50_sector[sym][0]
-    emoji = "🟢" if ch >= 0 else "🔴"
-    ticker_text += f"<span>{emoji} {name} ₹{p:.2f} ({ch:+.2f}%)</span>"
-st.markdown(f'<div class="ticker"><marquee behavior="scroll" scrollamount="6">{ticker_text}</marquee></div>', unsafe_allow_html=True)
-st.caption(f"Selected: Model = {model_choice} | Budget = ₹{budget} | Cost per Trade = ₹{trans_cost_per_trade} | Sector = {sector_choice}")
+years = st.sidebar.slider("Data years", 3, 10, 5)
+st.sidebar.caption("GST 18% brokerage mela mattum add aagum.")
+if not LSTM_AVAILABLE:
+    st.sidebar.warning("TensorFlow illa - LSTM work aagadhu.")
 
 # ------------------------------------------------
-# 5. SECTOR WISE PREDICTION - UN CODE ADHE, ONNUM MAATHALA
+# 5. HEADER / TICKER
 # ------------------------------------------------
+st.title("📈 Nifty-XAI - Education Project")
+ticker_html = ""
+for sym in ["RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "TCS.NS", "ITC.NS", "SBIN.NS", "LT.NS", "TITAN.NS"]:
+    p, ch = get_last_close(sym)
+    ticker_html += f"<span>{'🟢' if ch >= 0 else '🔴'} {nifty_50_sector[sym][0]} ₹{p:.2f} ({ch:+.2f}%)</span>"
+st.markdown(f'<div class="ticker">{ticker_html}</div>', unsafe_allow_html=True)
+st.caption("Prices = last close (live illa). Prediction = next trading day Up/Down probability.")
 
+filtered = {k: v for k, v in nifty_50_sector.items() if sector_choice == "All Sectors" or v[1] == sector_choice}
+
+# ------------------------------------------------
+# 6. PREDICTION
+# ------------------------------------------------
 st.subheader(f"📊 Sector Wise Prediction - {model_choice}")
 if st.button("🚀 Run Prediction", type="primary"):
-    with st.spinner(f"{model_choice} la predict pannudhu..."):
-        results = []
-        progress = st.progress(0)
-        filtered = {k: v for k, v in nifty_50_sector.items() if sector_choice == "All Sectors" or v[1] == sector_choice}
-        for i, (sym, (name, sec)) in enumerate(filtered.items()):
-            r = predict_one_company(sym, model_choice, years=5)
-            if r:
-                results.append({"Company": name, "Sector": sec, "Live Price": r["price"], "Prediction": r["pred"], "Up Probability %": r["prob"]*100, "Accuracy %": r["acc"]*100, "Expected Price Tomorrow": r["exp_price"], "Expected Move %": r["exp_move"], "RSI": r["rsi"]})
-            progress.progress((i+1)/len(filtered))
-        st.session_state['res'] = pd.DataFrame(results)
-    st.success("Mudinjiduchu!")
+    rows, errors = [], []
+    bar = st.progress(0, text="Running...")
+    for i, (sym, (name, sec)) in enumerate(filtered.items()):
+        r = run_model(sym, model_choice, years)
+        if "error" in r:
+            errors.append((name, r["error"]))
+        else:
+            rows.append({
+                "Company": name, "Sector": sec, "Last Close": r["price"], "Data Date": r["date"],
+                "Prediction": "Up 🟢" if r["prob"] > 0.5 else "Down 🔴",
+                "Up Probability %": r["prob"] * 100,
+                "Test Accuracy %": r["acc"] * 100,
+                "Baseline Acc %": max(r["base_acc"], r["naive_acc"]) * 100,
+                "Edge %": (r["acc"] - max(r["base_acc"], r["naive_acc"])) * 100,
+                "Expected Return %": r["exp_ret_pct"], "RSI": r["rsi"],
+            })
+        bar.progress((i + 1) / len(filtered), text=f"{name} done")
+    bar.empty()
+    st.session_state['res'] = pd.DataFrame(rows)
+    st.session_state['errors'] = errors
+
+if st.session_state.get('errors'):
+    with st.expander(f"⚠️ {len(st.session_state['errors'])} company la error"):
+        for n, e in st.session_state['errors']:
+            st.write(f"**{n}**: {e}")
 
 if 'res' in st.session_state and len(st.session_state['res']) > 0:
     df_res = st.session_state['res']
+
     st.subheader("Sector Wise Average")
-    sector_avg = df_res.groupby("Sector").agg(Avg_Up_Prob=("Up Probability %", "mean"), Companies=("Company", "count")).sort_values("Avg_Up_Prob", ascending=False)
-    st.dataframe(sector_avg.style.format("{:.2f}"))
-    st.bar_chart(sector_avg["Avg_Up_Prob"])
-    st.subheader("Company List with Prediction Value")
-    st.dataframe(df_res.sort_values("Up Probability %", ascending=False).style.format({"Live Price": "₹{:.2f}", "Up Probability %": "{:.1f}%", "Accuracy %": "{:.1f}%", "Expected Price Tomorrow": "₹{:.2f}", "Expected Move %": "{:+.2f}%", "RSI": "{:.1f}"}))
+    sec_avg = (df_res.groupby("Sector")
+               .agg(Avg_Up_Prob=("Up Probability %", "mean"), Avg_Edge=("Edge %", "mean"), Companies=("Company", "count"))
+               .sort_values("Avg_Up_Prob", ascending=False))
+    st.dataframe(sec_avg.style.format({"Avg_Up_Prob": "{:.1f}%", "Avg_Edge": "{:+.1f}%", "Companies": "{:.0f}"}))
+    st.bar_chart(sec_avg["Avg_Up_Prob"])
+    st.caption("Edge % = model accuracy - best baseline accuracy. Edge ~0 or negative na model-ku value illa.")
 
+    st.subheader("Company List")
+    st.dataframe(df_res.sort_values("Up Probability %", ascending=False).style.format({
+        "Last Close": "₹{:.2f}", "Up Probability %": "{:.1f}%", "Test Accuracy %": "{:.1f}%",
+        "Baseline Acc %": "{:.1f}%", "Edge %": "{:+.1f}%", "Expected Return %": "{:+.3f}%", "RSI": "{:.1f}"}),
+        use_container_width=True)
+
+    # ------------------------------------------------
+    # 7. PORTFOLIO SIMULATION
+    # ------------------------------------------------
     st.divider()
-    st.subheader(f"💰 Rs {budget} Portfolio - Real Trading")
-    up_df = df_res[df_res["Prediction"].str.contains("Up")].sort_values("Up Probability %", ascending=False).head(5)
-    if len(up_df) == 0:
-        st.error("Up nu model sollura company illa. Cash ah kaiyila vechurunga.")
+    st.subheader(f"💰 Rs {budget:,} Portfolio Simulation (1-day hold)")
+    cand = df_res[(df_res["Up Probability %"] > 50) & (df_res["Expected Return %"] > 0)]
+    if only_edge:
+        cand = cand[cand["Edge %"] > 0]
+    cand = cand.sort_values("Up Probability %", ascending=False).head(top_n)
+
+    def charges(value):
+        b = brokerage
+        return b + b * 0.18 + value * other_pct / 100
+
+    if cand.empty:
+        st.info("Qualify aagura company illa. Cash ah vechurunga.")
     else:
-        st.markdown('<div class="portfolio-box">', unsafe_allow_html=True)
-        st.write(f"Top {len(up_df)} Up Stocks ah eduthu equal ah divide pannen.")
-        per_stock_budget = budget / len(up_df)
-        rows = []; total_invested = 0; total_expected = 0
-        for _, row in up_df.iterrows():
-            price = row["Live Price"]
-            qty = int(per_stock_budget // price)
-            if qty == 0: qty = 1
-            cost = qty * price
-            exp_val = qty * row["Expected Price Tomorrow"]
-            profit = exp_val - cost
-            rows.append({"Company": row["Company"], "Sector": row["Sector"], "Live Price": price, "Qty": qty, "Invested Rs": cost, "Expected Price Tomorrow": row["Expected Price Tomorrow"], "Expected Value": exp_val, "Expected Profit Rs": profit})
-            total_invested += cost; total_expected += exp_val
-        port_df = pd.DataFrame(rows)
-        st.dataframe(port_df.style.format({"Live Price": "₹{:.2f}", "Invested Rs": "₹{:.2f}", "Expected Price Tomorrow": "₹{:.2f}", "Expected Value": "₹{:.2f}", "Expected Profit Rs": "₹{:.2f}"}))
-        st.markdown('</div>', unsafe_allow_html=True)
+        per_stock = budget / len(cand)
+        rows = []
+        for _, r in cand.iterrows():
+            qty = int(per_stock // r["Last Close"])
+            if qty == 0:
+                continue                                           # budget thaandi vaanga maatom
+            buy_val = qty * r["Last Close"]
+            exp_sell_val = buy_val * (1 + r["Expected Return %"] / 100)
+            rows.append({"Company": r["Company"], "Qty": qty, "Buy Price": r["Last Close"],
+                         "Invested": buy_val, "Exp. Sell Value": exp_sell_val,
+                         "Buy Charges": charges(buy_val), "Sell Charges": charges(exp_sell_val),
+                         "Gross P/L": exp_sell_val - buy_val})
+        if not rows:
+            st.warning("Budget romba kammi - oru share kooda vaanga mudiyala.")
+        else:
+            pf = pd.DataFrame(rows)
+            pf["Net P/L"] = pf["Gross P/L"] - pf["Buy Charges"] - pf["Sell Charges"]
+            st.dataframe(pf.style.format({c: "₹{:.2f}" for c in pf.columns if c not in ["Company", "Qty"]}),
+                         use_container_width=True)
 
-        st.markdown('<div class="charges-box">', unsafe_allow_html=True)
-        st.subheader("🧾 Transaction Cost + GST + Amount in Hand")
-        num_trades = len(port_df)
-        total_trans_cost = trans_cost_per_trade * num_trades
-        gst_part = total_trans_cost * 18 / 118
-        brokerage_part = total_trans_cost - gst_part
-        amount_in_hand = budget - total_invested - total_trans_cost
-        gross_profit = total_expected - total_invested
-        net_profit = gross_profit - total_trans_cost
-        net_pct = (net_profit / total_invested * 100) if total_invested > 0 else 0
+            invested = pf["Invested"].sum()
+            buy_ch, sell_ch = pf["Buy Charges"].sum(), pf["Sell Charges"].sum()
+            cash_left = budget - invested - buy_ch
+            gross, net = pf["Gross P/L"].sum(), pf["Net P/L"].sum()
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Invested", f"₹{total_invested:.2f}")
-        c1.metric("No. of Trades", f"{num_trades}")
-        c2.metric(f"Transaction Cost ({num_trades} x ₹{trans_cost_per_trade})", f"₹{total_trans_cost:.2f}")
-        c2.metric("Adhula GST (18%) Approx", f"₹{gst_part:.2f}")
-        c3.metric("Brokerage + Others", f"₹{brokerage_part:.2f}")
-        c3.metric("Amount in Hand (Cash Left)", f"₹{amount_in_hand:.2f}")
-        st.divider()
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("💰 Budget", f"₹{budget:.2f}")
-        col2.metric("💸 Amount in Hand", f"₹{amount_in_hand:.2f}")
-        col3.metric("📈 Gross Profit", f"₹{gross_profit:.2f}")
-        col4.metric("🏆 Net Profit (After Cost)", f"₹{net_profit:.2f}", f"{net_pct:.2f}%")
-        st.caption(f"Formula: Net Profit = Expected Value - Invested - (Transaction Cost per Trade ₹{trans_cost_per_trade} x {num_trades} Trades). GST indha cost kulla included.")
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.warning("⚠️ Education ku mattum. Model 100% correct illa, loss um varalam.")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Invested", f"₹{invested:.2f}")
+            c2.metric("Cash Left (after buy charges)", f"₹{cash_left:.2f}")
+            c3.metric("Total Charges (Buy+Sell)", f"₹{buy_ch + sell_ch:.2f}")
+            c4.metric("Expected Net P/L", f"₹{net:.2f}", f"{net / invested * 100:.2f}%")
+            st.caption(f"Gross expected P/L ₹{gross:.2f}. Charges = {len(pf)} buy + {len(pf)} sell orders. "
+                       "Expected return = historical avg up/down move × model probability. Idhu guarantee illa.")
+            if net <= 0:
+                st.warning("Expected profit charges ah cover panna mudiyala - real trading la loss chance adhigam.")
+    st.warning("⚠️ Education ku mattum. Investment advice illa. Daily direction accuracy usually ~50-55% dhaan.")
 else:
-    st.info("👈 Left sidebar la Model, Amount, Cost ah maathi, mela Run Prediction ah click pannu.")
+    st.info("👈 Settings maathi 'Run Prediction' click pannunga.")
 
-# ================================================================
-# EXTRA ADD ONLY - KEELA MATTUM - UN CODE AH MODIFY PANNALA
-# 4 MODEL ODA PREDICTION AH TABLE FORMAT LA KAAMIKKA
-# ================================================================
-
+# ------------------------------------------------
+# 8. 4-MODEL COMPARISON TABLE
+# ------------------------------------------------
 st.divider()
-st.subheader("📊 Extra Table - 4 Model Comparison - Sector Wise")
-st.caption(f"Sector: {sector_choice} - Keela button ah click panna, andha sector oda yalla company ku 4 model oda prediction um table la varum. Mela irukura code ah onnum thodala.")
+st.subheader("📊 4 Model Comparison - Sector Wise")
+include_lstm = st.checkbox("LSTM um serkkanum (romba slow)", value=False, disabled=not LSTM_AVAILABLE)
+if st.button("📊 Show 4 Model Comparison Table"):
+    names = MODEL_NAMES if include_lstm else MODEL_NAMES[:3]
+    rows, errors = [], []
+    bar = st.progress(0, text="Running...")
+    for i, (sym, (name, sec)) in enumerate(filtered.items()):
+        row = {"Company": name, "Sector": sec}
+        ok = False
+        for mn in names:
+            r = run_model(sym, mn, years)
+            short = mn.split(".")[0] + "." + mn.split(".")[1].split()[0]
+            if "error" in r:
+                row[f"{short} Up %"], row[f"{short} Acc %"] = np.nan, np.nan
+                errors.append((name, mn, r["error"]))
+            else:
+                ok = True
+                row["Last Close"] = r["price"]
+                row[f"{short} Up %"], row[f"{short} Acc %"] = r["prob"] * 100, r["acc"] * 100
+        if ok:
+            rows.append(row)
+        bar.progress((i + 1) / len(filtered), text=f"{name} done")
+    bar.empty()
+    st.session_state['cmp'] = pd.DataFrame(rows)
+    st.session_state['cmp_err'] = errors
 
-# Extra function - 4 model um orae vaati run pannum - Un predict_one_company ah reuse pannudhu, modify pannala
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_4model_table(sector_filter):
-    filtered_extra = {k: v for k, v in nifty_50_sector.items() if sector_filter == "All Sectors" or v[1] == sector_filter}
-    rows_extra = []
-    for sym_extra, (name_extra, sec_extra) in filtered_extra.items():
-        # Un function ah 4 vaati call pannurom - 4 model ku
-        r1 = predict_one_company(sym_extra, "1. Naive", years=2)
-        r2 = predict_one_company(sym_extra, "2. Logistic Regression", years=2)
-        r3 = predict_one_company(sym_extra, "3. XGBoost", years=2)
-        # LSTM slow na, idha mattum konjam fast ah - years=2, epochs already 10 dhan
-        r4 = predict_one_company(sym_extra, "4. LSTM (Deep Learning)", years=2)
-        if r1 and r2 and r3:
-            price_extra = r1["price"]
-            # LSTM kedaikala na 0 nu podurom
-            lstm_prob_extra = r4["prob"]*100 if r4 else 0
-            lstm_acc_extra = r4["acc"]*100 if r4 else 0
-            rows_extra.append({
-                "Company": name_extra,
-                "Sector": sec_extra,
-                "Live Price": price_extra,
-                "1. Naive - Up %": r1["prob"]*100,
-                "2. Logistic - Up %": r2["prob"]*100,
-                "3. XGBoost - Up %": r3["prob"]*100,
-                "4. LSTM - Up %": lstm_prob_extra,
-                "1. Naive Acc %": r1["acc"]*100,
-                "2. Logistic Acc %": r2["acc"]*100,
-                "3. XGBoost Acc %": r3["acc"]*100,
-                "4. LSTM Acc %": lstm_acc_extra,
-                "RSI": r1["rsi"]
-            })
-    return pd.DataFrame(rows_extra)
-
-if st.button("📊 Show 4 Model Comparison Table", type="secondary"):
-    with st.spinner(f"{sector_choice} sector ku 4 model um run aagudhu... LSTM na konjam time edukkum"):
-        df_4model = get_4model_table(sector_choice)
-        st.session_state['df_4model_extra'] = df_4model
-    st.success(f"{sector_choice} - {len(df_4model)} company - 4 Model Table Ready!")
-
-if 'df_4model_extra' in st.session_state and len(st.session_state['df_4model_extra']) > 0:
-    df_show_extra = st.session_state['df_4model_extra']
-    st.write(f"**Showing: {sector_choice} - Total {len(df_show_extra)} Companies - 4 Model Prediction Table**")
-    st.dataframe(
-        df_show_extra.sort_values("3. XGBoost - Up %", ascending=False).style.format({
-            "Live Price": "₹{:.2f}",
-            "1. Naive - Up %": "{:.1f}%",
-            "2. Logistic - Up %": "{:.1f}%",
-            "3. XGBoost - Up %": "{:.1f}%",
-            "4. LSTM - Up %": "{:.1f}%",
-            "1. Naive Acc %": "{:.1f}%",
-            "2. Logistic Acc %": "{:.1f}%",
-            "3. XGBoost Acc %": "{:.1f}%",
-            "4. LSTM Acc %": "{:.1f}%",
-            "RSI": "{:.1f}"
-        }),
-        use_container_width=True
-    )
-    # Chinna summary - Average Accuracy
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("1. Naive Avg Acc", f"{df_show_extra['1. Naive Acc %'].mean():.2f}%")
-    c2.metric("2. Logistic Avg Acc", f"{df_show_extra['2. Logistic Acc %'].mean():.2f}%")
-    c3.metric("3. XGBoost Avg Acc", f"{df_show_extra['3. XGBoost Acc %'].mean():.2f}%")
-    c4.metric("4. LSTM Avg Acc", f"{df_show_extra['4. LSTM Acc %'].mean():.2f}%")
-else:
-    st.info("Keela irukura 'Show 4 Model Comparison Table' button ah click pannu. Sector ah Banking / IT nu maathi click panna, andha sector oda yalla company + 4 model prediction varum.")
+if 'cmp' in st.session_state and len(st.session_state['cmp']) > 0:
+    cmp_df = st.session_state['cmp']
+    st.dataframe(cmp_df.style.format(
+        {c: "{:.1f}%" for c in cmp_df.columns if c.endswith("%")} | {"Last Close": "₹{:.2f}"}, na_rep="N/A"),
+        use_container_width=True)
+    acc_cols = [c for c in cmp_df.columns if c.endswith("Acc %")]
+    cols = st.columns(len(acc_cols))
+    for col, ac in zip(cols, acc_cols):
+        col.metric(ac.replace(" %", " Avg"), f"{cmp_df[ac].mean():.2f}%")
+    if st.session_state.get('cmp_err'):
+        with st.expander("Errors"):
+            for n, m, e in st.session_state['cmp_err']:
+                st.write(f"**{n}** ({m}): {e}")

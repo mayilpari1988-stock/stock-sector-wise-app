@@ -7,3 +7,4 @@ yfinance>=0.2.36
 xgboost>=2.0.0
 scipy>=1.11.0
 shap>=0.44.0
+tensorflow-cpu>=2.15.0

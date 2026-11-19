@@ -1,4 +1,4 @@
-# Nifty-XAI (Fixed Version) - Education purpose only
+# Nifty-XAI - LSTM + XGBoost + Full Project
 # Run: streamlit run app.py
 
 import warnings
@@ -57,7 +57,7 @@ sectors = sorted(set(v[1] for v in nifty_50_sector.values()))
 MODEL_NAMES = ["1. Naive", "2. Logistic Regression", "3. XGBoost", "4. LSTM (Deep Learning)"]
 
 try:
-    import tensorflow  # noqa: F401
+    import tensorflow
     LSTM_AVAILABLE = True
 except Exception:
     LSTM_AVAILABLE = False
@@ -116,7 +116,7 @@ def make_features(raw):
     return df
 
 # ------------------------------------------------
-# 3. MODEL RUNNER
+# 3. LSTM MODEL - MAIN MODEL
 # ------------------------------------------------
 def _run_lstm(Xtr, ytr, Xte, yte, X_latest_hist, n_feat, seq_len=60):
     from tensorflow.keras.models import Sequential
@@ -187,10 +187,9 @@ def run_model(symbol, model_name, years):
             m.fit(Xtr, ytr)
             prob = float(m.predict_proba(X_latest)[0][1])
             acc = float((m.predict(Xte) == yte).mean())
-        else:
+        else:  # LSTM
             if not LSTM_AVAILABLE:
-                return {"error": "TensorFlow install illa"}
-            # FIX: LSTM-ku latest row-um serthu anuppurom
+                return {"error": "TensorFlow install illa - requirements la tensorflow-cpu add pannunga"}
             hist = np.vstack([Xtr, Xte, X_latest])
             prob, acc = _run_lstm(Xtr, ytr, Xte, yte, hist, len(feature_cols))
 
@@ -216,8 +215,13 @@ def run_model(symbol, model_name, years):
 # ------------------------------------------------
 st.sidebar.title("⚙️ Settings")
 model_choice = st.sidebar.selectbox("Model Selection", MODEL_NAMES, index=2)
+if LSTM_AVAILABLE:
+    st.sidebar.success("✅ LSTM Ready - TensorFlow Found")
+else:
+    st.sidebar.error("❌ LSTM NOT Ready - TensorFlow illa. App-a Reboot pannunga")
+
 budget = st.sidebar.number_input("Amount (Rs)", min_value=1000, max_value=1_000_000, value=10000, step=1000)
-st.sidebar.markdown("**Charges (Delivery trade)** - un broker contract note paathu maathunga")
+st.sidebar.markdown("**Charges (Delivery trade)**")
 brokerage = st.sidebar.number_input("Brokerage per Order (Rs)", min_value=0.0, max_value=500.0, value=0.0, step=1.0)
 stt_pct = st.sidebar.number_input("STT % (buy + sell rendu side)", min_value=0.0, max_value=1.0, value=0.100, step=0.005, format="%.3f")
 stamp_pct = st.sidebar.number_input("Stamp duty % (buy side mattum)", min_value=0.0, max_value=1.0, value=0.015, step=0.001, format="%.3f")
@@ -228,12 +232,9 @@ top_n = st.sidebar.slider("Max stocks in portfolio", 1, 10, 5)
 only_edge = st.sidebar.checkbox("Baseline ah beat panna models mattum", value=False)
 sector_choice = st.sidebar.selectbox("Sector Filter", ["All Sectors"] + sectors)
 years = st.sidebar.slider("Data years", 3, 10, 5)
-st.sidebar.caption("GST 18% brokerage + exchange + SEBI mela add aagum. DP charge already GST serthu. Rates maarum - verify pannunga.")
-if not LSTM_AVAILABLE:
-    st.sidebar.warning("TensorFlow illa - LSTM work aagadhu.")
 
 # ------------------------------------------------
-# 5. HEADER / TICKER - SCROLLING FIX
+# 5. HEADER / TICKER - SCROLLING
 # ------------------------------------------------
 st.title("📈 Nifty-XAI - Education Project")
 ticker_html = ""
@@ -284,16 +285,12 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
                .sort_values("Avg_Up_Prob", ascending=False))
     st.dataframe(sec_avg.style.format({"Avg_Up_Prob": "{:.1f}%", "Avg_Edge": "{:+.1f}%", "Companies": "{:.0f}"}))
     st.bar_chart(sec_avg["Avg_Up_Prob"])
-    st.caption("Edge % = model accuracy - best baseline accuracy. Edge ~0 or negative na model-ku value illa.")
     st.subheader("Company List")
     st.dataframe(df_res.sort_values("Up Probability %", ascending=False).style.format({
         "Last Close": "₹{:.2f}", "Up Probability %": "{:.1f}%", "Test Accuracy %": "{:.1f}%",
         "Baseline Acc %": "{:.1f}%", "Edge %": "{:+.1f}%", "Expected Return %": "{:+.3f}%", "RSI": "{:.1f}"}),
         use_container_width=True)
 
-    # ------------------------------------------------
-    # 7. PORTFOLIO SIMULATION
-    # ------------------------------------------------
     st.divider()
     st.subheader(f"💰 Rs {budget:,} Portfolio Simulation (1-day hold)")
     cand = df_res[(df_res["Up Probability %"] > 50) & (df_res["Expected Return %"] > 0)]
@@ -352,13 +349,34 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
             with st.expander("🧾 Charges breakdown (buy + sell)"):
                 bd = pd.DataFrame({"Charge": list(breakdown.keys()), "Rs": list(breakdown.values())})
                 st.dataframe(bd.style.format({"Rs": "₹{:.2f}"}), hide_index=True)
-            st.caption(f"Gross expected P/L ₹{gross:.2f}. Charges = {len(pf)} buy + {len(pf)} sell orders. "
-                       "Expected return = historical avg up/down move × model probability. Idhu guarantee illa.")
-            if net <= 0:
-                st.warning("Expected profit charges ah cover panna mudiyala - real trading la loss chance adhigam.")
-    st.warning("⚠️ Education ku mattum. Investment advice illa. Daily direction accuracy usually ~50-55% dhaan.")
+    st.warning("⚠️ Education ku mattum. Investment advice illa.")
 else:
     st.info("👈 Settings maathi 'Run Prediction' click pannunga.")
+
+# ------------------------------------------------
+# 7. LSTM SECTION - GUIDE-KU MAIN
+# ------------------------------------------------
+st.divider()
+st.subheader("🧠 LSTM (Deep Learning) - Main Model")
+st.write("LSTM = Long Short-Term Memory. 60 days history paathu naalaiku Up/Down predict panrathu.")
+st.write("Architecture: Input (60, 11) -> LSTM 32 + Dropout 0.2 -> LSTM 32 + Dropout 0.2 -> Dense 16 -> Sigmoid")
+st.write("Epochs: 8, Batch: 32, Optimizer: Adam, Loss: Binary Crossentropy")
+if LSTM_AVAILABLE:
+    st.success("✅ LSTM Ready - TensorFlow Found. Keezha button-a click panni LSTM-a run pannalam.")
+else:
+    st.error("❌ TensorFlow illa. Streamlit Cloud-la Manage app -> Reboot pannunga.")
+
+if st.button("🧠 Run LSTM Only (1 Company - Demo)", type="primary"):
+    with st.spinner("LSTM training... 1-2 nimisham aagum..."):
+        r = run_model("RELIANCE.NS", "4. LSTM (Deep Learning)", years)
+        if "error" in r:
+            st.error(r["error"])
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Reliance Last Close", f"₹{r['price']:.2f}")
+            c2.metric("LSTM Up Probability", f"{r['prob']*100:.1f}%")
+            c3.metric("LSTM Test Accuracy", f"{r['acc']*100:.1f}%")
+            st.write(f"Prediction: {'Up 🟢' if r['prob'] > 0.5 else 'Down 🔴'} | Expected Return: {r['exp_ret_pct']:+.3f}% | RSI: {r['rsi']:.1f}")
 
 # ------------------------------------------------
 # 8. 4-MODEL COMPARISON TABLE

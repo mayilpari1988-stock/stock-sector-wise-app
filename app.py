@@ -1,6 +1,3 @@
-# Nifty-XAI - LSTM + XGBoost + Full Project
-# Run: streamlit run app.py
-
 import warnings
 warnings.filterwarnings("ignore")
 

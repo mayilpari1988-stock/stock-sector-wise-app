@@ -187,7 +187,7 @@ def run_model(symbol, model_name, years):
             m.fit(Xtr, ytr)
             prob = float(m.predict_proba(X_latest)[0][1])
             acc = float((m.predict(Xte) == yte).mean())
-        else:  # LSTM
+        else:
             if not LSTM_AVAILABLE:
                 return {"error": "TensorFlow install illa - requirements la tensorflow-cpu add pannunga"}
             hist = np.vstack([Xtr, Xte, X_latest])
@@ -233,11 +233,11 @@ only_edge = st.sidebar.checkbox("Baseline ah beat panna models mattum", value=Fa
 sector_choice = st.sidebar.selectbox("Sector Filter", ["All Sectors"] + sectors)
 years = st.sidebar.slider("Data years", 3, 10, 5)
 
-# FILTER - ORU THADAVA MATTUM, INGA THAAN MA
+# FILTER - ORU THADAVA MATTUM
 filtered = {k: v for k, v in nifty_50_sector.items() if sector_choice == "All Sectors" or v[1] == sector_choice}
 
 # ------------------------------------------------
-# 5. HEADER / TICKER - SCROLLING
+# 5. HEADER / TICKER
 # ------------------------------------------------
 st.title("📈 Nifty-XAI - Education Project")
 ticker_html = ""
@@ -292,11 +292,12 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
         "Baseline Acc %": "{:.1f}%", "Edge %": "{:+.1f}%", "Expected Return %": "{:+.3f}%", "RSI": "{:.1f}"}),
         use_container_width=True)
     st.divider()
-        st.subheader(f"💰 Rs {budget:,} Portfolio Simulation (1-day hold)")
+    st.subheader(f"💰 Rs {budget:,} Portfolio Simulation (1-day hold)")
     cand = df_res[(df_res["Up Probability %"] > 50) & (df_res["Expected Return %"] > 0) & (df_res["Last Close"].notna()) & (df_res["Last Close"] > 0)]
     if only_edge:
         cand = cand[cand["Edge %"] > 0]
     cand = cand.sort_values("Up Probability %", ascending=False).head(top_n)
+
     def charges(value, side):
         exch = value * (exch_pct + sebi_pct) / 100
         return {
@@ -314,17 +315,17 @@ if 'res' in st.session_state and len(st.session_state['res']) > 0:
         per_stock = budget / len(cand)
         rows, parts = [], []
         for _, r in cand.iterrows():
-    price = float(r["Last Close"])
-    if not np.isfinite(price) or price <= 0:
-        continue
-    qty = int(per_stock // price)
-    if qty == 0:
-        continue
-            buy_val = qty * r["Last Close"]
+            price = float(r["Last Close"])
+            if not np.isfinite(price) or price <= 0:
+                continue
+            qty = int(per_stock // price)
+            if qty == 0:
+                continue
+            buy_val = qty * price
             exp_sell_val = buy_val * (1 + r["Expected Return %"] / 100)
             bc, sc = charges(buy_val, "buy"), charges(exp_sell_val, "sell")
             parts.append((bc, sc))
-            rows.append({"Company": r["Company"], "Qty": qty, "Buy Price": r["Last Close"],
+            rows.append({"Company": r["Company"], "Qty": qty, "Buy Price": price,
                          "Invested": buy_val, "Exp. Sell Value": exp_sell_val,
                          "Buy Charges": sum(bc.values()), "Sell Charges": sum(sc.values()),
                          "Gross P/L": exp_sell_val - buy_val})
@@ -356,7 +357,7 @@ else:
     st.info("👈 Settings maathi 'Run Prediction' click pannunga.")
 
 # ------------------------------------------------
-# 7. LSTM SECTION - GUIDE-KU MAIN
+# 7. LSTM SECTION
 # ------------------------------------------------
 st.divider()
 st.subheader("🧠 LSTM (Deep Learning) - Main Model")

@@ -342,7 +342,7 @@ def evidence_table(res, ref_cost_pct):
         k = res[f"k_{key}"]
         if k.isna().all():
             rows.append({"Model": label, "Accuracy": "N/A", "95% CI": "", "p (vs 50%)": "",
-                         "Edge vs baseline": "", "Up signals": "", "Gross/signal": "", "Net/signal": ""})
+                         "Edge": "", "Up signals": "", "Gross/signal": "", "Net/signal": ""})
             continue
         ok = k.notna()
         kk, nn = int(k[ok].sum()), int(res.n_test[ok].sum())
@@ -352,7 +352,7 @@ def evidence_table(res, ref_cost_pct):
         rows.append({
             "Model": label, "Accuracy": f"{kk / nn * 100:.2f}%", "95% CI": f"{lo * 100:.1f}-{hi * 100:.1f}%",
             "p (vs 50%)": f"{binom_p(kk, nn):.3f}",
-            "Edge vs baseline": f"{(kk / nn - res.k_base[ok].sum() / nn) * 100:+.2f}%",
+            "Edge": f"{(kk / nn - res.k_base[ok].sum() / nn) * 100:+.2f}%",
             "Up signals": f"{ups:,}",
             "Gross/signal": f"{gross:+.3f}%" if ups else "-",
             "Net/signal": f"{gross - ref_cost_pct:+.3f}%" if ups else "-",
@@ -503,9 +503,8 @@ for col, (key, label) in zip(cols, MODELS):
     ok = k.notna()
     nn = res.n_test[ok].sum()
     acc, b = k[ok].sum() / nn, res.k_base[ok].sum() / nn
-    col.metric(label, f"{acc * 100:.2f}%", f"{(acc - b) * 100:+.2f}% vs baseline ({b * 100:.1f}%)")
-st.caption("Naive = 'indru Up na naalaiku Up' (simple rule). Logistic / XGBoost / LSTM = machine learning. "
-           "Baseline = 'eppavum adhigam vara direction-a solluradhu'. Final prediction = Logistic + XGBoost + LSTM average (Naive baseline-a vote-la serkkala).")
+    col.metric(label, f"{acc * 100:.2f}%", f"Edge {(acc - b) * 100:+.2f}%")
+st.caption("Edge = model accuracy - 'eppavum adhigam vara direction-a solluradhu' accuracy. Final prediction = Logistic + XGBoost + LSTM average.")
 
 # ---- 3b. BUY LIST ----
 pf = build_portfolio(res, budget)
@@ -589,7 +588,7 @@ st.subheader("🔬 Research Evidence - Model nijamaave work aagudha?")
 st.dataframe(ev, hide_index=True, use_container_width=True)
 best_net = ev["Net/signal"].replace("-", np.nan).dropna()
 st.caption(
-    f"Out-of-sample test: {n_total:,} stock-days ({len(res)} stocks x last 20% data). Majority baseline accuracy = {base_acc * 100:.2f}%. "
+    f"Out-of-sample test: {n_total:,} stock-days ({len(res)} stocks x last 20% data). Always-guess-majority accuracy = {base_acc * 100:.2f}%. "
     f"'Gross/signal' = model 'Up' sonna naal-la next-day avg return. 'Net/signal' = gross - round-trip charges ({ref_cost:.2f}% for ₹10,000 position). "
     "p-value normal approximation; 50 stocks correlated-a irukkradhaala optimistic, 4 models test panradhaala p < 0.0125 dhaan significant (Bonferroni).")
 try:
@@ -607,7 +606,7 @@ with st.expander("📊 Ella 50 companies - 4 model table"):
         "Company": r.Company, "Sector": r.Sector, "Last Close": f"₹{r.price:,.2f}",
         "Naive Up": pct(r.p_naive), "Logistic Up": pct(r.p_lr), "XGBoost Up": pct(r.p_xgb),
         "LSTM Up": pct(r.p_lstm), "Final Up": pct(r.prob), "Models Up": f"{r.votes_up}/{r.n_models}",
-        "Holdout Acc": f"{r.acc * 100:.1f}%", "Baseline": f"{r.base * 100:.1f}%", "RSI": f"{r.rsi:.0f}",
+        "Holdout Acc": f"{r.acc * 100:.1f}%", "Edge": f"{(r.acc - r.base) * 100:+.1f}%", "RSI": f"{r.rsi:.0f}",
     } for r in res.sort_values("prob", ascending=False).itertuples()])
     st.dataframe(full, hide_index=True, use_container_width=True)
 
@@ -617,7 +616,7 @@ with st.expander("📑 Method & Limitations (research note)"):
 - **Features (11):** 1/5/10/20-day returns, MA5/20, MA20/50 ratio, price vs MA20, 10/20-day volatility, RSI(14), volume change.
 - **Target:** naalaiku close > indru close.
 - **Split:** time-ordered 80/20, train-ku test-ku naduvula {EMBARGO}-day embargo. Scaler train data-la mattum fit. Random shuffle illa.
-- **Models:** Naive (momentum rule) | Logistic Regression | XGBoost (150 trees, depth 3) | LSTM (2 x 32, 60-day window, 6 epochs).
+- **Models:** Naive (momentum rule) | Logistic Regression | XGBoost (150 trees, depth 3) | LSTM (2 x 32 units, 60-day window, 6 epochs).
   Final signal = Logistic + XGBoost + LSTM probability average. LSTM test-ku train-la irundhu mattum train aagum, prediction-ku refit illa (time save).
 - **XAI:** XGBoost SHAP (TreeSHAP) contributions - top 2 features indha prediction-a evlo push pannuchu.
 - **Expected return:** P(Up) x historical avg Up-day move + P(Down) x avg Down-day move. Idhu model-oda estimate, real price target illa.

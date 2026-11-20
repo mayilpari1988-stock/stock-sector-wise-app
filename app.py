@@ -32,7 +32,7 @@ from sklearn.preprocessing import StandardScaler
 # SETTINGS (delivery trade charges - un broker contract note paathu maathunga)
 # ------------------------------------------------
 YEARS = 5
-MAX_STOCKS = 8          # max evlo stocks suggest pannanum
+MAX_STOCKS = 8          # max number of stocks to suggest
 MAX_PER_SECTOR = 2      # oru sector-la max evlo stock (diversification)
 BROKERAGE = 0.0         # Rs per order (Zerodha delivery = 0)
 STT_PCT = 0.100         # buy + sell
@@ -132,7 +132,7 @@ def load_all(years):
 # FEATURES + MODEL
 # ------------------------------------------------
 def make_features(raw):
-    """Latest row DROP pannala - adhu dhaan naalaiku prediction row."""
+    """The latest row is kept (not dropped) - it is the row used to predict tomorrow."""
     df = raw.copy()
     df['Return_1d'] = df['Close'].pct_change(1)
     df['Return_5d'] = df['Close'].pct_change(5)
@@ -262,7 +262,7 @@ def analyse(raw, use_lstm):
         except Exception:
             pass
 
-    voters = [m for m in ("lr", "xgb", "lstm") if m in p_te]   # Naive = baseline, final vote-la illa
+    voters = [m for m in ("lr", "xgb", "lstm") if m in p_te]   # Naive is only a reference, not part of the final vote
     p_te["ens"] = np.mean([p_te[m] for m in voters], axis=0)
     p_now["ens"] = float(np.mean([p_now[m] for m in voters]))
 
@@ -307,7 +307,7 @@ def analyse(raw, use_lstm):
 def analyse_symbol(sym, years, use_lstm):
     data = load_all(years)
     if sym not in data:
-        return {"error": "data kidaikala (illa < 250 naal)"}
+        return {"error": "not enough price data (less than 250 days)"}
     try:
         return analyse(data[sym], use_lstm)
     except Exception as e:
@@ -334,15 +334,15 @@ def wilson(k, n, z=1.96):
 
 
 def evidence_table(res, ref_cost_pct):
-    """4 models + ensemble: pooled out-of-sample accuracy, significance, signal return vs cost."""
+    """4 models + final: pooled test accuracy, significance, signal return vs charges."""
     n_total = int(res.n_test.sum())
     base_acc = res.k_base.sum() / n_total
     rows = []
-    for key, label in MODELS + [("ens", "Final (vote)")]:
+    for key, label in MODELS + [("ens", "Final")]:
         k = res[f"k_{key}"]
         if k.isna().all():
-            rows.append({"Model": label, "Accuracy": "N/A", "95% CI": "", "p (vs 50%)": "",
-                         "Edge": "", "Up signals": "", "Gross/signal": "", "Net/signal": ""})
+            rows.append({"Model": label, "Accuracy": "N/A", "Up calls": "", "Avg gain per Up call": "",
+                         "After charges": "", "95% range": "", "p-value": "", "Edge": ""})
             continue
         ok = k.notna()
         kk, nn = int(k[ok].sum()), int(res.n_test[ok].sum())
@@ -350,12 +350,11 @@ def evidence_table(res, ref_cost_pct):
         ups = int(res[f"up_{key}"][ok].sum())
         gross = (res[f"sr_{key}"][ok].sum() / ups * 100) if ups else np.nan
         rows.append({
-            "Model": label, "Accuracy": f"{kk / nn * 100:.2f}%", "95% CI": f"{lo * 100:.1f}-{hi * 100:.1f}%",
-            "p (vs 50%)": f"{binom_p(kk, nn):.3f}",
+            "Model": label, "Accuracy": f"{kk / nn * 100:.2f}%", "Up calls": f"{ups:,}",
+            "Avg gain per Up call": f"{gross:+.3f}%" if ups else "-",
+            "After charges": f"{gross - ref_cost_pct:+.3f}%" if ups else "-",
+            "95% range": f"{lo * 100:.1f}-{hi * 100:.1f}%", "p-value": f"{binom_p(kk, nn):.3f}",
             "Edge": f"{(kk / nn - res.k_base[ok].sum() / nn) * 100:+.2f}%",
-            "Up signals": f"{ups:,}",
-            "Gross/signal": f"{gross:+.3f}%" if ups else "-",
-            "Net/signal": f"{gross - ref_cost_pct:+.3f}%" if ups else "-",
         })
     return pd.DataFrame(rows), base_acc, n_total
 
@@ -426,7 +425,7 @@ def pct(v):
 
 st.set_page_config(page_title="Nifty-XAI", page_icon="📈", layout="wide")
 st.title("📈 Nifty-XAI")
-st.caption("Nifty 50 stocks-ku naalaiku Up/Down predict panni (4 models), un amount-ku edha vaanganum nu sollum. Education / research project.")
+st.caption("Predicts if each Nifty 50 stock will go up or down tomorrow, and suggests what to buy with your amount. For learning only.")
 
 # ---- 1. TOP: scrolling ticker ----
 tick = get_ticker_data()
@@ -447,18 +446,17 @@ if tick:
     </style>
     <div class="wrap"><div class="track">{items}</div></div>
     """, height=52)
-    st.caption("Nifty 50 - last market close & previous close-la irundhu % change (5 min-ku oru thadava refresh). Mouse vachaa pause aagum.")
+    st.caption("Last close price and change from the previous day. Refreshes every 5 minutes. Hover to pause.")
 else:
-    st.warning("Ticker data kidaikala (yfinance / internet check pannunga).")
+    st.warning("Could not load prices. Please check your internet connection.")
 
 # ---- 2. MIDDLE: amount + button ----
 st.divider()
 c1, c2, c3 = st.columns([2, 1.4, 1])
-amount = c1.number_input("💰 Amount (Rs)", min_value=1000, max_value=10_000_000, value=10000, step=1000)
-use_lstm = c2.checkbox("LSTM um serkkanum (first time 5-15 min)", value=LSTM_OK, disabled=not LSTM_OK,
-                       help="TensorFlow install aagi irundha mattum work aagum. Illa-na LSTM 'N/A' nu varum.")
+amount = c1.number_input("💰 Amount (₹)", min_value=1000, max_value=10_000_000, value=10000, step=1000)
+use_lstm = c2.checkbox("Include LSTM (slow the first time, 5-15 min)", value=LSTM_OK, disabled=not LSTM_OK)
 if not LSTM_OK:
-    c2.caption("⚠️ TensorFlow illa - LSTM N/A")
+    c2.caption("TensorFlow is not installed, so LSTM is off.")
 c3.write("")
 go = c3.button("🚀 Predict & Suggest", type="primary", use_container_width=True)
 
@@ -466,7 +464,7 @@ if go:
     rows, errs = [], []
     bar = st.progress(0, text="Starting...")
     for i, (sym, (name, sector)) in enumerate(STOCKS.items()):
-        bar.progress((i + 1) / len(STOCKS), text=f"{name} ({i + 1}/{len(STOCKS)})")
+        bar.progress((i + 1) / len(STOCKS), text=f"Analysing {name} ({i + 1}/{len(STOCKS)})")
         r = analyse_symbol(sym, YEARS, bool(use_lstm))
         if "error" in r:
             errs.append(f"{name}: {r['error']}")
@@ -479,47 +477,45 @@ if go:
 
 # ---- 3. BOTTOM: result ----
 if "res" not in st.session_state:
-    st.info("👆 Amount enter panni, 'Predict & Suggest' click pannunga.")
+    st.info("👆 Enter an amount and click 'Predict & Suggest'.")
     st.stop()
 
 res, errs, budget = st.session_state["res"], st.session_state["errs"], st.session_state["budget"]
 if res.empty:
-    st.error("Data / model run aagala. Internet check pannitu thirumba try pannunga.")
+    st.error("Could not get data or run the models. Please check your internet connection and try again.")
     for e in errs[:5]:
         st.write(e)
     st.stop()
 
-ref_cost = (charges(10000, "buy") + charges(10000, "sell")) / 10000 * 100   # Rs 10,000 position-ku round-trip %
+ref_cost = (charges(10000, "buy") + charges(10000, "sell")) / 10000 * 100   # round-trip charges % on a Rs 10,000 trade
 ev, base_acc, n_total = evidence_table(res, ref_cost)
 
 # ---- 3a. 4 MODELS ----
-st.subheader("🧠 4 Models - Out-of-sample Accuracy (last 20% data, 50 stocks pooled)")
+st.subheader("🧠 4 Models - How often was each one right?")
 cols = st.columns(4)
 for col, (key, label) in zip(cols, MODELS):
     k = res[f"k_{key}"]
     if k.isna().all():
-        col.metric(label, "N/A", "LSTM off / TensorFlow illa", delta_color="off")
+        col.metric(label, "N/A", "Off or TensorFlow missing", delta_color="off")
         continue
     ok = k.notna()
-    nn = res.n_test[ok].sum()
-    acc, b = k[ok].sum() / nn, res.k_base[ok].sum() / nn
-    col.metric(label, f"{acc * 100:.2f}%", f"Edge {(acc - b) * 100:+.2f}%")
-st.caption("Edge = model accuracy - 'eppavum adhigam vara direction-a solluradhu' accuracy. Final prediction = Logistic + XGBoost + LSTM average.")
+    col.metric(label, f"{k[ok].sum() / res.n_test[ok].sum() * 100:.2f}%")
+st.caption("Tested on the most recent 20% of days, across all 50 stocks.")
 
 # ---- 3b. BUY LIST ----
 pf = build_portfolio(res, budget)
-st.subheader(f"🛒 ₹{budget:,} ku - Entha Stock, Evlo Count")
+st.subheader(f"🛒 What to buy with ₹{budget:,}")
 if not pf:
-    st.info("Indha nerathula Up-nu sollura strong stock illa (illa un amount-ku vaanga mudiyala). "
-            "Cash-ah vechurunga - NO TRADE dhaan best decision.")
+    st.info("No stock looks like a good buy right now, or your amount is too small. "
+            "Keep the cash - not trading is the best choice.")
 else:
     table = pd.DataFrame([{
         "Company": r["Company"], "Sector": r["Sector"], "Qty": r["qty"],
         "Price": f"₹{r['price']:,.2f}", "Amount": f"₹{r['amount']:,.2f}",
         "Naive Up": pct(r["p_naive"]), "Logistic Up": pct(r["p_lr"]),
         "XGBoost Up": pct(r["p_xgb"]), "LSTM Up": pct(r["p_lstm"]),
-        "Final Up": pct(r["prob"]), "Models Up": f"{r['votes_up']}/{r['n_models']}",
-        "XAI - Yen Up? (SHAP)": r["why"],
+        "Final Up": pct(r["prob"]), "Models saying Up": f"{r['votes_up']}/{r['n_models']}",
+        "Why (XAI)": r["why"],
     } for r in pf])
     st.dataframe(table, hide_index=True, use_container_width=True)
 
@@ -537,95 +533,98 @@ else:
         a, b = st.columns(2)
         a.metric("Amount", f"₹{budget:,.2f}")
         b.metric("Invested (shares)", f"₹{invested:,.2f}")
-        a.metric("Buy Charges", f"₹{buy_ch:,.2f}")
-        b.metric("Cash Left", f"₹{cash_left:,.2f}")
-        a.metric("Expected Sell Value (1 day)", f"₹{exp_sell:,.2f}")
+        a.metric("Buy charges", f"₹{buy_ch:,.2f}")
+        b.metric("Cash left", f"₹{cash_left:,.2f}")
+        a.metric("Expected sell value (1 day)", f"₹{exp_sell:,.2f}")
         b.metric("Exp. Net P/L (1 day)", f"₹{net:,.2f}", f"{net / invested * 100:+.2f}%")
         sec_split = pd.DataFrame(pf).groupby("Sector")["amount"].sum().sort_values(ascending=False)
-        st.caption("Sector split: " + " | ".join(f"{s} ₹{a_:,.0f}" for s, a_ in sec_split.items()))
+        st.caption("Money by sector: " + " | ".join(f"{s} ₹{a_:,.0f}" for s, a_ in sec_split.items()))
     with right:
-        verdict = (f"Net **positive** (₹{net:,.2f}) - aana idhu chinna number, model accuracy 50-55% dhaan, so guarantee illa."
+        verdict = (f"The net is positive (₹{net:,.2f}), but it is small. The model is right only about 50-55% of the time, so nothing is guaranteed."
                    if net > 0 else
-                   "Net **negative** - 1 naal trade-la charges profit-ai saapiduchu. Ippadi trade panna loss varra chance adhigam.")
+                   "The net is negative. The charges eat the profit, so a 1-day trade like this is likely to lose money.")
         st.info(
-            "**📝 Exp. Net P/L - ena artham?**\n\n"
-            f"1. Model-padi {len(pf)} stocks-kum serthu ₹{invested:,.0f} la, naalaiku **gross ₹{gross:,.2f}** varum nu expect "
-            "(probability x avg Up/Down move).\n"
-            f"2. Aana **buy charges ₹{buy_ch:,.2f} + sell charges ₹{sell_ch:,.2f}** (DP ₹{DP_CHARGE} per stock serthu) kodukkanum.\n"
-            f"3. Gross - Charges = **₹{net:,.2f}**. {verdict}\n"
-            f"4. Break-even: stocks avg **{breakeven:.2f}%** move aaganum - appo dhaan charges cover aagum. "
-            f"Oru stock-oda typical Up-day move ~{np.mean([r['avg_up'] for r in pf]):.1f}% dhaan."
+            "**📝 What does Exp. Net P/L mean?**\n\n"
+            f"1. You invest ₹{invested:,.0f} in {len(pf)} stocks. The model expects a gross gain of **₹{gross:,.2f}** tomorrow.\n"
+            f"2. You pay **₹{buy_ch:,.2f} buy charges + ₹{sell_ch:,.2f} sell charges** (this includes the ₹{DP_CHARGE} DP fee per stock sold).\n"
+            f"3. Gross gain - charges = **₹{net:,.2f}**. {verdict}\n"
+            f"4. To break even, your stocks must rise about **{breakeven:.2f}%**. "
+            f"A typical up day moves only about {np.mean([r['avg_up'] for r in pf]):.1f}%."
         )
 
-    # ---- 3c. KUTTY NOTES ----
-    st.subheader("📒 Kutty Notes - Eppo Buy, Eppo Sell")
+    # ---- 3c. QUICK NOTES ----
+    st.subheader("📒 Quick Notes - When to Buy, When to Sell")
     plan = pd.DataFrame([{
         "Company": r["Company"], "Qty": r["qty"],
         "Buy around": f"₹{r['price']:,.2f}",
-        "Sell target (typical Up day)": f"₹{r['price'] * (1 + r['avg_up'] / 100):,.2f}",
-        "Exit if below (typical Down day)": f"₹{r['price'] * (1 + r['avg_dn'] / 100):,.2f}",
-        "Note": ("⚠️ RSI %.0f - overbought, jaagradhai" % r["rsi"]) if r["rsi"] > 70
-                else ("RSI %.0f - oversold, bounce chance" % r["rsi"]) if r["rsi"] < 30 else "",
+        "Sell target": f"₹{r['price'] * (1 + r['avg_up'] / 100):,.2f}",
+        "Exit if below": f"₹{r['price'] * (1 + r['avg_dn'] / 100):,.2f}",
+        "Note": ("⚠️ RSI %.0f - overbought, be careful" % r["rsi"]) if r["rsi"] > 70
+                else ("RSI %.0f - oversold, may bounce" % r["rsi"]) if r["rsi"] < 30 else "",
     } for r in pf])
     st.dataframe(plan, hide_index=True, use_container_width=True)
 
     avoid = res[res.prob < 0.45].sort_values("prob").head(3)
-    avoid_txt = ", ".join(f"{r.Company} ({r.prob * 100:.0f}%)" for r in avoid.itertuples()) or "illa"
+    avoid_txt = ", ".join(f"{r.Company} ({r.prob * 100:.0f}% Up)" for r in avoid.itertuples()) or "none"
     st.markdown(
-        f"- **BUY eppo?** Indha prediction **{res.date.max()}** close data-la irundhu. Next trading day market open (9:15 AM) aanadhum "
-        "udane vaanga vendaam - first 15-20 min price romba hop aagum, settle aana piragu **limit order** podunga.\n"
-        "- **SELL eppo?** Model **1-naal** prediction. So vaangina next trading day-oda kadaisi (3:00-3:25 PM) la sell pannuradhu dhaan plan.\n"
-        "- **Naduvula profit?** Price 'Sell target' touch aana, adhukku mela wait pannaama profit book pannalaam.\n"
-        "- **Naduvula loss?** Price 'Exit if below' keela poitta, model prediction thappunu artham - perusaa loss aagaama sell pannalaam.\n"
-        f"- **Vaanga vendaam (Down chance adhigam):** {avoid_txt}.\n"
-        "- **Mukkiyam:** Model *close-to-close* predict pannum. Nee market open-la vaangina overnight gap already nadandhirukkum, "
-        "adhu model-ku theriyadhu. Same-day sell (intraday) panna charges vera maadhiri irukkum.\n"
-        "- Idhu model-oda estimate. Investment advice illa."
+        f"- **When to buy:** This prediction uses data up to **{res.date.max()}**. After the market opens on the next trading day (9:15 AM), "
+        "wait 15-20 minutes for the price to settle, then place a **limit order**.\n"
+        "- **When to sell:** The prediction is for **1 day**. The plan is to sell on the next trading day near the close (3:00-3:25 PM).\n"
+        "- **Taking profit early:** If the price reaches 'Sell target', you can sell and keep the profit.\n"
+        "- **Limiting loss:** If the price falls below 'Exit if below', the prediction was wrong. You can sell early to avoid a bigger loss.\n"
+        f"- **Avoid (likely to fall):** {avoid_txt}.\n"
+        "- **Important:** The model predicts from one close to the next close. If you buy at the next open, the overnight price jump has already happened "
+        "and the model cannot see it. Selling on the same day has different charges.\n"
+        "- This is a model estimate, not investment advice."
     )
 
-# ---- 3d. RESEARCH EVIDENCE ----
-st.subheader("🔬 Research Evidence - Model nijamaave work aagudha?")
-st.dataframe(ev, hide_index=True, use_container_width=True)
-best_net = ev["Net/signal"].replace("-", np.nan).dropna()
+# ---- 3d. DOES IT WORK? ----
+st.subheader("🔬 Does the model really work?")
+st.dataframe(ev[["Model", "Accuracy", "Up calls", "Avg gain per Up call", "After charges"]],
+             hide_index=True, use_container_width=True)
 st.caption(
-    f"Out-of-sample test: {n_total:,} stock-days ({len(res)} stocks x last 20% data). Always-guess-majority accuracy = {base_acc * 100:.2f}%. "
-    f"'Gross/signal' = model 'Up' sonna naal-la next-day avg return. 'Net/signal' = gross - round-trip charges ({ref_cost:.2f}% for ₹10,000 position). "
-    "p-value normal approximation; 50 stocks correlated-a irukkradhaala optimistic, 4 models test panradhaala p < 0.0125 dhaan significant (Bonferroni).")
+    f"Tested on {n_total:,} stock-days (50 stocks, most recent 20% of days). "
+    "'Avg gain per Up call' = average next-day return on days the model said Up. "
+    f"'After charges' = that minus round-trip charges ({ref_cost:.2f}% on a ₹10,000 trade). 50% accuracy is the same as a coin flip.")
 try:
-    nets = [float(v.replace("%", "")) for v in best_net]
+    nets = [float(v.replace("%", "")) for v in ev["After charges"] if v not in ("", "-")]
     if nets and max(nets) <= 0:
-        st.error("**Finding:** Edha model-um charges-ai cover panra alavukku net edge kaattala. "
-                 "Direction accuracy konjam 50%-ku mela irundhaalum, 1-day trade-la cost-ku appuram profit illa.")
+        st.error("**Result:** No model beats the trading charges. Even when accuracy is a little above 50%, a 1-day trade loses money after charges.")
     elif nets:
-        st.success("**Finding:** Sila model-ku net positive theriyudhu - aana out-of-sample, correlated stocks, survivorship bias ellam serthu paatha, adhu nijamaana edge-a nu confirm panna innum test venum.")
+        st.success("**Result:** Some models look positive after charges, but this needs more testing before you trust it.")
 except Exception:
     pass
 
-with st.expander("📊 Ella 50 companies - 4 model table"):
+with st.expander("📈 More statistics"):
+    st.dataframe(ev[["Model", "Accuracy", "95% range", "p-value", "Edge"]], hide_index=True, use_container_width=True)
+    st.caption("95% range = where the true accuracy probably lies. p-value below 0.0125 means the result is unlikely to be luck "
+               "(adjusted for testing 4 models). Edge = accuracy minus the accuracy of always guessing the more common direction.")
+
+with st.expander("📊 All 50 companies - 4 model table"):
     full = pd.DataFrame([{
         "Company": r.Company, "Sector": r.Sector, "Last Close": f"₹{r.price:,.2f}",
         "Naive Up": pct(r.p_naive), "Logistic Up": pct(r.p_lr), "XGBoost Up": pct(r.p_xgb),
-        "LSTM Up": pct(r.p_lstm), "Final Up": pct(r.prob), "Models Up": f"{r.votes_up}/{r.n_models}",
-        "Holdout Acc": f"{r.acc * 100:.1f}%", "Edge": f"{(r.acc - r.base) * 100:+.1f}%", "RSI": f"{r.rsi:.0f}",
+        "LSTM Up": pct(r.p_lstm), "Final Up": pct(r.prob), "Models saying Up": f"{r.votes_up}/{r.n_models}",
+        "Test accuracy": f"{r.acc * 100:.1f}%", "RSI": f"{r.rsi:.0f}",
     } for r in res.sort_values("prob", ascending=False).itertuples()])
     st.dataframe(full, hide_index=True, use_container_width=True)
 
-with st.expander("📑 Method & Limitations (research note)"):
+with st.expander("📑 How it works"):
     st.markdown(f"""
-- **Data:** yfinance, {YEARS} years daily (adjusted), 50 current Nifty stocks. *Survivorship bias:* ippo index-la irukkura stocks mattum - palaya-la veliya poyi irukkura stocks illa.
-- **Features (11):** 1/5/10/20-day returns, MA5/20, MA20/50 ratio, price vs MA20, 10/20-day volatility, RSI(14), volume change.
-- **Target:** naalaiku close > indru close.
-- **Split:** time-ordered 80/20, train-ku test-ku naduvula {EMBARGO}-day embargo. Scaler train data-la mattum fit. Random shuffle illa.
-- **Models:** Naive (momentum rule) | Logistic Regression | XGBoost (150 trees, depth 3) | LSTM (2 x 32 units, 60-day window, 6 epochs).
-  Final signal = Logistic + XGBoost + LSTM probability average. LSTM test-ku train-la irundhu mattum train aagum, prediction-ku refit illa (time save).
-- **XAI:** XGBoost SHAP (TreeSHAP) contributions - top 2 features indha prediction-a evlo push pannuchu.
-- **Expected return:** P(Up) x historical avg Up-day move + P(Down) x avg Down-day move. Idhu model-oda estimate, real price target illa.
-- **Charges:** delivery trade (STT, stamp, exchange, SEBI, GST, DP). Rates maarum - code top-la maathikkalaam.
-- **Limitations:** single holdout period (regime-specific), 50 stocks correlated, transaction costs approximate, slippage / bid-ask illa, hyper-parameter tuning illa, intraday gap handle pannala.
+- **Data:** {YEARS} years of daily prices from yfinance for the 50 current Nifty stocks. Stocks that left the index in the past are not included, so results look slightly better than reality.
+- **Inputs (11):** 1, 5, 10 and 20-day returns, MA5/MA20 and MA20/MA50 ratios, price vs MA20, 10 and 20-day volatility, RSI(14), volume change.
+- **Goal:** predict if tomorrow's close will be higher than today's close.
+- **Testing:** the models learn from the older 80% of days and are tested on the newest 20%, with a {EMBARGO}-day gap in between. No shuffling.
+- **Models:** Naive (if today was up, tomorrow is up) | Logistic Regression | XGBoost | LSTM (2 layers of 32 units, looks at the last 60 days).
+- **Final prediction:** average of Logistic, XGBoost and LSTM. The LSTM is trained once on the older 80% of days.
+- **Why (XAI):** SHAP values from XGBoost show which 2 inputs pushed the prediction the most.
+- **Expected return:** chance of Up x average Up-day move + chance of Down x average Down-day move. It is an estimate, not a price target.
+- **Charges:** delivery trade - STT, stamp duty, exchange fee, SEBI fee, GST and DP fee. Rates change, so you can edit them at the top of the code.
+- **Limits:** one test period, stocks move together, charges are approximate, no slippage, no tuning, no overnight gap handling.
 """)
 
 if errs:
-    with st.expander(f"⚠️ {len(errs)} stocks skip aachu"):
+    with st.expander(f"⚠️ {len(errs)} stocks were skipped"):
         for e in errs:
             st.write(e)
-st.warning("⚠️ Education / research ku mattum. Investment advice illa. Daily direction prediction romba kashtam - loss varalam.")
+st.warning("⚠️ For learning and research only. Not investment advice. Predicting daily direction is very hard, and you can lose money.")

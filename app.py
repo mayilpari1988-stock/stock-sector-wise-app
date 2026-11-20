@@ -1,18 +1,46 @@
-# Nifty-XAI - 4 Models + XAI + Sector Portfolio + Full Nifty 50 Ticker
+# Nifty-XAI (Simple) - Education purpose only
+# Run: streamlit run app.py
+#
+# requirements.txt:
+#   streamlit
+#   yfinance
+#   pandas
+#   numpy
+#   scikit-learn
+#   xgboost
+#
+# Flow:
+#   1. Top   : Nifty 50 last-close ticker (scrolling)
+#   2. Middle: Amount enter -> "Predict & Suggest" button
+#   3. Bottom: Evlo amount-ayum use panni, ella sector-layum irundhu entha stock,
+#              evlo qty, evlo Rs - XAI reason oda small table
+
 import warnings
 warnings.filterwarnings("ignore")
+
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 import xgboost as xgb
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
-st.set_page_config(page_title="Nifty-XAI", page_icon="📈", layout="wide")
-st.markdown("""<style>.ticker{background-color:#1a237e;color:white;padding:10px;border-radius:8px;font-weight:bold;font-size:14px;overflow:hidden;white-space:nowrap;}.ticker span{margin-right:28px;}</style>""", unsafe_allow_html=True)
+# ------------------------------------------------
+# SETTINGS (delivery trade charges - un broker contract note paathu maathunga)
+# ------------------------------------------------
+YEARS = 5
+MAX_STOCKS = 8          # max evlo stocks suggest pannanum
+MAX_PER_SECTOR = 2      # oru sector-la max evlo stock (diversification)
+BROKERAGE = 0.0         # Rs per order (Zerodha delivery = 0)
+STT_PCT = 0.100         # buy + sell
+STAMP_PCT = 0.015       # buy only
+EXCH_PCT = 0.003        # NSE transaction charge
+SEBI_PCT = 0.0001
+DP_CHARGE = 15.93       # Rs per stock SOLD (GST serthu)
 
-nifty_50_sector = {
+STOCKS = {
     "HDFCBANK.NS": ("HDFC Bank", "Banking"), "ICICIBANK.NS": ("ICICI Bank", "Banking"),
     "SBIN.NS": ("SBI", "Banking"), "AXISBANK.NS": ("Axis Bank", "Banking"),
     "KOTAKBANK.NS": ("Kotak Bank", "Banking"), "BAJFINANCE.NS": ("Bajaj Finance", "Finance"),
@@ -40,43 +68,76 @@ nifty_50_sector = {
     "ETERNAL.NS": ("Eternal (Zomato)", "Consumer"), "INDIGO.NS": ("IndiGo", "Aviation"),
     "TRENT.NS": ("Trent", "Retail"),
 }
-sectors = sorted(set(v[1] for v in nifty_50_sector.values()))
-MODEL_NAMES = ["1. Naive", "2. Logistic Regression", "3. XGBoost", "4. LSTM (Deep Learning)"]
-try:
-    import tensorflow
-    LSTM_AVAILABLE = True
-except Exception:
-    LSTM_AVAILABLE = False
 
-feature_cols = ['Return_1d', 'Return_5d', 'Return_10d', 'Return_20d', 'MA_Ratio_5_20', 'MA_Ratio_20_50', 'Price_vs_MA20', 'Vol_10', 'Vol_20', 'RSI', 'Vol_Change']
+FEATURES = ['Return_1d', 'Return_5d', 'Return_10d', 'Return_20d', 'MA_Ratio_5_20',
+            'MA_Ratio_20_50', 'Price_vs_MA20', 'Vol_10', 'Vol_20', 'RSI', 'Vol_Change']
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_data(symbol, years):
-    df = yf.download(symbol, period=f"{years}y", progress=False, auto_adjust=True)
-    if df is None or df.empty:
-        return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df
 
+# ------------------------------------------------
+# CHARGES
+# ------------------------------------------------
+def charges(value, side):
+    """Oru order ku total charges (Rs). side = 'buy' / 'sell'."""
+    exch = value * (EXCH_PCT + SEBI_PCT) / 100
+    total = BROKERAGE + exch + 0.18 * (BROKERAGE + exch) + value * STT_PCT / 100
+    if side == "buy":
+        total += value * STAMP_PCT / 100
+    else:
+        total += DP_CHARGE
+    return total
+
+
+# ------------------------------------------------
+# DATA
+# ------------------------------------------------
 @st.cache_data(ttl=300, show_spinner=False)
-def get_last_close(symbol):
+def get_ticker_data():
+    """50 stocks last close + % change - oru download-la."""
+    syms = list(STOCKS)
+    out = []
     try:
-        h = yf.Ticker(symbol).history(period="5d")
-        if len(h) >= 2:
-            curr, prev = float(h['Close'].iloc[-1]), float(h['Close'].iloc[-2])
-            return curr, (curr - prev) / prev * 100
+        raw = yf.download(syms, period="7d", group_by="ticker", auto_adjust=True,
+                          progress=False, threads=True)
+        for s in syms:
+            try:
+                c = raw[s]["Close"].dropna()
+                if len(c) >= 2:
+                    out.append((STOCKS[s][0], float(c.iloc[-1]),
+                                (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100))
+            except Exception:
+                continue
     except Exception:
         pass
-    return 0.0, 0.0
+    return out
 
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_all(years):
+    syms = list(STOCKS)
+    raw = yf.download(syms, period=f"{years}y", group_by="ticker", auto_adjust=True,
+                      progress=False, threads=True)
+    out = {}
+    for s in syms:
+        try:
+            d = raw[s].dropna(subset=["Close"])[["Close", "Volume"]].copy()
+            if len(d) >= 250:
+                out[s] = d
+        except Exception:
+            continue
+    return out
+
+
+# ------------------------------------------------
+# FEATURES + MODEL
+# ------------------------------------------------
 def make_features(raw):
+    """Latest row DROP pannala - adhu dhaan naalaiku prediction row."""
     df = raw.copy()
     df['Return_1d'] = df['Close'].pct_change(1)
     df['Return_5d'] = df['Close'].pct_change(5)
     df['Return_10d'] = df['Close'].pct_change(10)
     df['Return_20d'] = df['Close'].pct_change(20)
-    ma5 = df['Close'].rolling(5).mean(); ma20 = df['Close'].rolling(20).mean(); ma50 = df['Close'].rolling(50).mean()
+    ma5, ma20, ma50 = (df['Close'].rolling(n).mean() for n in (5, 20, 50))
     df['MA_Ratio_5_20'] = ma5 / ma20
     df['MA_Ratio_20_50'] = ma20 / ma50
     df['Price_vs_MA20'] = df['Close'] / ma20 - 1
@@ -90,270 +151,257 @@ def make_features(raw):
     df['NextRet'] = df['Close'].pct_change().shift(-1)
     df['Target'] = (df['NextRet'] > 0).astype(float).where(df['NextRet'].notna())
     df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.dropna(subset=feature_cols)
     df['Vol_Change'] = df['Vol_Change'].clip(-5, 5)
-    return df
+    return df.dropna(subset=FEATURES)
 
-def xai_reason(row):
+
+def describe(feat, v):
+    """Feature value -> human readable."""
+    if feat == 'RSI':
+        return f"RSI {v:.0f}"
+    if feat == 'Return_1d':
+        return f"last day {v * 100:+.1f}%"
+    if feat == 'Return_5d':
+        return f"5-day {v * 100:+.1f}%"
+    if feat == 'Return_10d':
+        return f"10-day {v * 100:+.1f}%"
+    if feat == 'Return_20d':
+        return f"20-day {v * 100:+.1f}%"
+    if feat == 'MA_Ratio_5_20':
+        return "MA5 above MA20" if v > 1 else "MA5 below MA20"
+    if feat == 'MA_Ratio_20_50':
+        return "MA20 above MA50" if v > 1 else "MA20 below MA50"
+    if feat == 'Price_vs_MA20':
+        return f"price {v * 100:+.1f}% vs MA20"
+    if feat in ('Vol_10', 'Vol_20'):
+        return f"volatility {v * 100:.1f}%"
+    if feat == 'Vol_Change':
+        return f"volume {v * 100:+.0f}% vs prev day"
+    return feat
+
+
+def new_xgb():
+    return xgb.XGBClassifier(n_estimators=150, max_depth=3, learning_rate=0.05,
+                             subsample=0.8, colsample_bytree=0.8,
+                             eval_metric='logloss', random_state=42)
+
+
+def analyse(raw):
+    f = make_features(raw)
+    train = f.dropna(subset=['Target'])
+    X, y = train[FEATURES].values, train['Target'].astype(int).values
+    x_now = f[FEATURES].iloc[[-1]].values
+    split = int(len(X) * 0.8)
+    Xtr, Xte, ytr, yte = X[:split], X[split:], y[:split], y[split:]
+
+    # 1) Holdout check (accuracy vs baseline)
+    sc = StandardScaler().fit(Xtr)
+    lr = LogisticRegression(max_iter=1000).fit(sc.transform(Xtr), ytr)
+    xg = new_xgb().fit(Xtr, ytr)
+    p_te = (lr.predict_proba(sc.transform(Xte))[:, 1] + xg.predict_proba(Xte)[:, 1]) / 2
+    acc = float(((p_te > 0.5).astype(int) == yte).mean())
+    base = float((yte == int(ytr.mean() >= 0.5)).mean())
+
+    # 2) Final model - ella data-vilum train, naalaiku prediction
+    sc2 = StandardScaler().fit(X)
+    lr2 = LogisticRegression(max_iter=1000).fit(sc2.transform(X), y)
+    xg2 = new_xgb().fit(X, y)
+    prob = float((lr2.predict_proba(sc2.transform(x_now))[0][1] + xg2.predict_proba(x_now)[0][1]) / 2)
+
+    # 3) XAI - XGBoost SHAP contributions (last column = bias)
+    contrib = xg2.get_booster().predict(xgb.DMatrix(x_now), pred_contribs=True)[0][:-1]
+    order = np.argsort(contrib) if prob < 0.5 else np.argsort(-contrib)
     reasons = []
-    if row['RSI'] > 70:
-        reasons.append("RSI Overbought (>70) - Down risk")
-    elif row['RSI'] < 30:
-        reasons.append("RSI Oversold (<30) - Reversal chance Up")
-    elif 45 <= row['RSI'] <= 65:
-        reasons.append("RSI Neutral-Strong (45-65)")
-    if row['Return_1d'] > 0:
-        reasons.append("Yesterday Up - Momentum +")
-    else:
-        reasons.append("Yesterday Down - Momentum -")
-    if row['Return_5d'] > 0.02:
-        reasons.append("5-day trend Strong Up")
-    elif row['Return_5d'] < -0.02:
-        reasons.append("5-day trend Down")
-    if row['MA_Ratio_5_20'] > 1:
-        reasons.append("MA5 > MA20 - Short trend Up")
-    else:
-        reasons.append("MA5 < MA20 - Short trend Down")
-    if row['Price_vs_MA20'] > 0:
-        reasons.append("Price > MA20 - Above average")
-    else:
-        reasons.append("Price < MA20 - Below average")
-    return " | ".join(reasons)
+    for i in order[:2]:
+        sign = "+" if contrib[i] > 0 else "-"
+        reasons.append(f"{describe(FEATURES[i], x_now[0][i])} ({sign})")
 
-def xai_suggestion(prob, exp_ret, edge, rsi):
-    if prob > 0.60 and exp_ret > 0.3 and edge > 0:
-        return "✅ STRONG BUY - High confidence"
-    if prob > 0.55 and exp_ret > 0:
-        return "🟢 BUY - Moderate confidence"
-    if prob > 0.50 and exp_ret > 0:
-        return "🟡 WATCH / SMALL BUY"
-    if prob < 0.45:
-        return "🔴 AVOID / SELL - Down chance high"
-    return "⚪ HOLD / NO TRADE - Cash hold"
+    # 4) Expected return = prob x avg up move + (1-prob) x avg down move
+    nr = train['NextRet'].values
+    avg_up = float(nr[nr > 0].mean()) if (nr > 0).any() else 0.0
+    avg_dn = float(nr[nr <= 0].mean()) if (nr <= 0).any() else 0.0
+    exp_ret = (prob * avg_up + (1 - prob) * avg_dn) * 100
 
-def _run_lstm(Xtr, ytr, Xte, yte, X_latest_hist, n_feat, seq_len=60):
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
-    import tensorflow as tf
-    tf.random.set_seed(42)
-    scaler = StandardScaler().fit(Xtr)
-    Xtr_s, Xte_s = scaler.transform(Xtr), scaler.transform(Xte)
-    hist_s = scaler.transform(X_latest_hist)
-    def seqs(data, labels, prev=None):
-        if prev is not None:
-            data = np.vstack([prev, data]); labels = np.concatenate([np.zeros(len(prev)), labels])
-        xs, ys = [], []
-        for i in range(seq_len, len(data)):
-            xs.append(data[i - seq_len:i]); ys.append(labels[i])
-        return np.array(xs), np.array(ys)
-    Xs_tr, ys_tr = seqs(Xtr_s, ytr)
-    Xs_te, ys_te = seqs(Xte_s, yte, prev=Xtr_s[-seq_len:])
-    model = Sequential([Input(shape=(seq_len, n_feat)), LSTM(32, return_sequences=True), Dropout(0.2), LSTM(32), Dropout(0.2), Dense(16, activation='relu'), Dense(1, activation='sigmoid')])
-    model.compile(optimizer='adam', loss='binary_crossentropy')
-    model.fit(Xs_tr, ys_tr, epochs=8, batch_size=32, verbose=0, validation_split=0.1)
-    acc = float(((model.predict(Xs_te, verbose=0).flatten() > 0.5).astype(int) == ys_te).mean())
-    prob = float(model.predict(hist_s[-seq_len:].reshape(1, seq_len, n_feat), verbose=0)[0][0])
-    return prob, acc
+    return {"prob": prob, "acc": acc, "base": base, "exp_ret": exp_ret,
+            "price": float(raw['Close'].iloc[-1]), "date": str(raw.index[-1].date()),
+            "why": ", ".join(reasons)}
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def run_all_models(symbol, years, include_lstm):
-    try:
-        raw = load_data(symbol, years)
-        if raw is None or len(raw) < 250:
-            return {"error": "Data kammi"}
-        df = make_features(raw)
-        train_df = df.dropna(subset=['Target'])
-        latest = df.iloc[[-1]]
-        X = train_df[feature_cols].values; y = train_df['Target'].astype(int).values
-        X_latest = latest[feature_cols].values
-        split = int(len(X) * 0.8)
-        Xtr, Xte, ytr, yte = X[:split], X[split:], y[:split], y[split:]
-        majority = int(ytr.mean() >= 0.5)
-        base_acc = float((yte == majority).mean())
-        naive_acc = float((((Xte[:, 0] > 0).astype(int)) == yte).mean())
-        out = {"price": float(raw['Close'].iloc[-1]), "date": str(raw.index[-1].date()), "base_acc": base_acc, "naive_acc": naive_acc, "rsi": float(latest['RSI'].iloc[0])}
-        naive_train = (Xtr[:, 0] > 0).astype(int)
-        up_mask = naive_train == 1
-        p_up = ytr[up_mask].mean() if up_mask.any() else 0.5
-        p_dn = ytr[~up_mask].mean() if (~up_mask).any() else 0.5
-        out["Naive_Prob"] = float(p_up if X_latest[0, 0] > 0 else p_dn); out["Naive_Acc"] = naive_acc
-        sc = StandardScaler().fit(Xtr)
-        m1 = LogisticRegression(max_iter=1000).fit(sc.transform(Xtr), ytr)
-        out["Logistic_Prob"] = float(m1.predict_proba(sc.transform(X_latest))[0][1]); out["Logistic_Acc"] = float((m1.predict(sc.transform(Xte)) == yte).mean())
-        m2 = xgb.XGBClassifier(n_estimators=150, max_depth=3, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8, eval_metric='logloss', random_state=42)
-        m2.fit(Xtr, ytr)
-        out["XGBoost_Prob"] = float(m2.predict_proba(X_latest)[0][1]); out["XGBoost_Acc"] = float((m2.predict(Xte) == yte).mean())
-        imp = m2.feature_importances_
-        top_idx = np.argsort(imp)[::-1][:3]
-        out["Top_Features"] = ", ".join([f"{feature_cols[i]} ({imp[i]*100:.0f}%)" for i in top_idx])
-        if include_lstm:
-            if not LSTM_AVAILABLE:
-                out["LSTM_Prob"] = np.nan; out["LSTM_Acc"] = np.nan
-            else:
-                hist = np.vstack([Xtr, Xte, X_latest])
-                p, a = _run_lstm(Xtr, ytr, Xte, yte, hist, len(feature_cols))
-                out["LSTM_Prob"] = p; out["LSTM_Acc"] = a
-        else:
-            out["LSTM_Prob"] = np.nan; out["LSTM_Acc"] = np.nan
-        probs = [out["Naive_Prob"], out["Logistic_Prob"], out["XGBoost_Prob"]]
-        if include_lstm and np.isfinite(out["LSTM_Prob"]):
-            probs.append(out["LSTM_Prob"])
-        out["Avg_Prob"] = float(np.mean(probs))
-        out["Final_Prob"] = float(out["XGBoost_Prob"])
-        nr = train_df['NextRet'].values[:split]
-        avg_up = float(nr[nr > 0].mean()) if (nr > 0).any() else 0.0
-        avg_dn = float(nr[nr <= 0].mean()) if (nr <= 0).any() else 0.0
-        out["exp_ret_pct"] = float((out["Final_Prob"] * avg_up + (1 - out["Final_Prob"]) * avg_dn) * 100)
-        for c in feature_cols:
-            out[c] = float(latest[c].iloc[0])
-        out["Return_1d"] = float(latest['Return_1d'].iloc[0]); out["Return_5d"] = float(latest['Return_5d'].iloc[0])
-        return out
-    except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}"}
-
-# SIDEBAR
-st.sidebar.title("⚙️ Settings")
-budget = st.sidebar.number_input("Amount (Rs)", min_value=1000, max_value=1000000, value=10000, step=1000)
-brokerage = st.sidebar.number_input("Brokerage per Order (Rs)", min_value=0.0, max_value=500.0, value=0.0, step=1.0)
-stt_pct = st.sidebar.number_input("STT %", min_value=0.0, max_value=1.0, value=0.100, step=0.005, format="%.3f")
-stamp_pct = st.sidebar.number_input("Stamp duty %", min_value=0.0, max_value=1.0, value=0.015, step=0.001, format="%.3f")
-exch_pct = st.sidebar.number_input("Exchange %", min_value=0.0, max_value=1.0, value=0.003, step=0.0005, format="%.4f")
-sebi_pct = st.sidebar.number_input("SEBI %", min_value=0.0, max_value=1.0, value=0.0001, step=0.0001, format="%.4f")
-dp_charge = st.sidebar.number_input("DP charge (Rs)", min_value=0.0, max_value=100.0, value=15.93, step=0.5)
-top_n = st.sidebar.slider("Max stocks in portfolio", 1, 10, 5)
-only_edge = st.sidebar.checkbox("Baseline ah beat panna mattum", value=False)
-years = st.sidebar.slider("Data years", 3, 10, 5)
-include_lstm = st.sidebar.checkbox("LSTM um serkkanum (slow)", value=False, disabled=not LSTM_AVAILABLE)
-if LSTM_AVAILABLE:
-    st.sidebar.success("✅ LSTM Ready")
-else:
-    st.sidebar.error("❌ LSTM NOT Ready - Reboot pannunga")
-
-# HEADER - FULL NIFTY 50 SCROLLING TICKER
-st.title("📈 Nifty-XAI - 4 Models + XAI")
-ticker_html = ""
-for sym, (nm, sec) in nifty_50_sector.items():
-    p, ch = get_last_close(sym)
-    color = "🟢" if ch >= 0 else "🔴"
-    ticker_html += f"<span>{color} {nm} ₹{p:.2f} ({ch:+.2f}%) | </span>"
-st.markdown(f'<div class="ticker"><marquee behavior="scroll" scrollamount="8" scrolldelay="20">{ticker_html}</marquee></div>', unsafe_allow_html=True)
-st.caption("Live Values = Last Close + Yesterday-la irundhu % Change | 50 Companies-um scroll aagum | Top = 4 Model Compare | Middle = XAI | Bottom = Sector Buy List")
-
-# TOP - 4 MODEL COMPARISON + PREDICTION
-st.subheader("📊 TOP: 4 Model Comparison - Sector Wise Prediction")
-if st.button("🚀 Run 4 Model Prediction", type="primary"):
+def run_analysis(years):
+    data = load_all(years)
     rows, errors = [], []
-    bar = st.progress(0, text="Running...")
-    for i, (sym, (name, sec)) in enumerate(nifty_50_sector.items()):
-        r = run_all_models(sym, years, include_lstm)
-        if "error" in r:
-            errors.append((name, r["error"]))
-        else:
-            best_acc = max(r["Naive_Acc"], r["Logistic_Acc"], r["XGBoost_Acc"], r["LSTM_Acc"] if np.isfinite(r["LSTM_Acc"]) else 0)
-            base = max(r["base_acc"], r["naive_acc"])
-            tmp = {"Company": name, "Sector": sec, "Symbol": sym, "Last Close": r["price"], "Data Date": r["date"],
-                   "Naive Up %": r["Naive_Prob"]*100, "Naive Acc %": r["Naive_Acc"]*100,
-                   "Logistic Up %": r["Logistic_Prob"]*100, "Logistic Acc %": r["Logistic_Acc"]*100,
-                   "XGBoost Up %": r["XGBoost_Prob"]*100, "XGBoost Acc %": r["XGBoost_Acc"]*100,
-                   "LSTM Up %": r["LSTM_Prob"]*100 if np.isfinite(r["LSTM_Prob"]) else np.nan,
-                   "LSTM Acc %": r["LSTM_Acc"]*100 if np.isfinite(r["LSTM_Acc"]) else np.nan,
-                   "Avg Up %": r["Avg_Prob"]*100, "Final Up %": r["Final_Prob"]*100,
-                   "Best Acc %": best_acc*100, "Baseline Acc %": base*100, "Edge %": (best_acc-base)*100,
-                   "Expected Return %": r["exp_ret_pct"], "RSI": r["rsi"],
-                   "Return_1d": r["Return_1d"], "Return_5d": r["Return_5d"],
-                   "MA_Ratio_5_20": r["MA_Ratio_5_20"], "Price_vs_MA20": r["Price_vs_MA20"],
-                   "Top_Features": r["Top_Features"]}
-            tmp["Prediction"] = "Up 🟢" if tmp["Final Up %"] > 50 else "Down 🔴"
-            tmp["XAI Reason"] = xai_reason(tmp)
-            tmp["XAI Suggestion"] = xai_suggestion(tmp["Final Up %"]/100, tmp["Expected Return %"], tmp["Edge %"], tmp["RSI"])
-            rows.append(tmp)
-        bar.progress((i+1)/len(nifty_50_sector), text=f"{name} done")
-    bar.empty()
-    st.session_state['res'] = pd.DataFrame(rows)
-    st.session_state['errors'] = errors
+    for sym, (name, sector) in STOCKS.items():
+        if sym not in data:
+            errors.append(f"{name}: data kidaikala")
+            continue
+        try:
+            r = analyse(data[sym])
+            r.update({"Company": name, "Sector": sector, "Symbol": sym})
+            rows.append(r)
+        except Exception as e:
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+    return pd.DataFrame(rows), errors
 
-if st.session_state.get('errors'):
-    with st.expander(f"⚠️ {len(st.session_state['errors'])} error"):
-        for n, e in st.session_state['errors']:
-            st.write(f"**{n}**: {e}")
 
-if 'res' in st.session_state and len(st.session_state['res']) > 0:
-    df_res = st.session_state['res']
-    st.subheader("🏆 Sector Wise Average - 4 Models")
-    sec_avg = df_res.groupby("Sector").agg(Naive=("Naive Up %", "mean"), Logistic=("Logistic Up %", "mean"), XGBoost=("XGBoost Up %", "mean"), LSTM=("LSTM Up %", "mean"), Avg=("Avg Up %", "mean"), BestAcc=("Best Acc %", "mean"), Count=("Company", "count")).sort_values("Avg", ascending=False)
-    st.dataframe(sec_avg.style.format({c: "{:.1f}%" for c in sec_avg.columns if c != "Count"}), use_container_width=True)
-    st.bar_chart(sec_avg["Avg"])
-    st.subheader("📋 Full Company List - 4 Model Comparison")
-    show_cols = ["Company", "Sector", "Last Close", "Prediction", "Naive Up %", "Logistic Up %", "XGBoost Up %", "LSTM Up %", "Avg Up %", "XGBoost Acc %", "Edge %", "Expected Return %", "RSI"]
-    st.dataframe(df_res.sort_values("Avg Up %", ascending=False)[show_cols].style.format({"Last Close": "₹{:.2f}", "Naive Up %": "{:.1f}%", "Logistic Up %": "{:.1f}%", "XGBoost Up %": "{:.1f}%", "LSTM Up %": "{:.1f}%", "Avg Up %": "{:.1f}%", "XGBoost Acc %": "{:.1f}%", "Edge %": "{:+.1f}%", "Expected Return %": "{:+.3f}%", "RSI": "{:.1f}"}), use_container_width=True)
-    st.divider()
-    st.subheader("🧠 XAI - Yen Up / Yen Down? + Suggestion")
-    st.write("XGBoost Top Features + RSI / Trend / MA la irundhu reason generate aaguthu.")
-    xai_cols = ["Company", "Sector", "Prediction", "Final Up %", "Expected Return %", "Top_Features", "XAI Reason", "XAI Suggestion"]
-    st.dataframe(df_res.sort_values("Final Up %", ascending=False)[xai_cols].style.format({"Final Up %": "{:.1f}%", "Expected Return %": "{:+.3f}%"}), use_container_width=True)
-    sel_comp = st.selectbox("Oru company-a select panni XAI detail paakalam", df_res["Company"].tolist())
-    r1 = df_res[df_res["Company"] == sel_comp].iloc[0]
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Final Up %", f"{r1['Final Up %']:.1f}%")
-    c2.metric("Expected Return", f"{r1['Expected Return %']:+.3f}%")
-    c3.metric("RSI", f"{r1['RSI']:.1f}")
-    c4.metric("Suggestion", r1["XAI Suggestion"])
-    st.info(f"**{sel_comp} - XAI Reason:** {r1['XAI Reason']}")
-    st.info(f"**Top Features (XGBoost):** {r1['Top_Features']}")
-    st.divider()
-    st.subheader("💰 BOTTOM: Sector Choose Panni Buy List")
-    bottom_sector = st.selectbox("Sector Choose Pannunga", ["All Sectors"] + sectors, key="bottom_sector")
-    filtered_bottom = df_res if bottom_sector == "All Sectors" else df_res[df_res["Sector"] == bottom_sector]
-    st.write(f"**{bottom_sector}** - Total Companies: {len(filtered_bottom)}")
-    st.dataframe(filtered_bottom.sort_values("Final Up %", ascending=False)[["Company", "Sector", "Last Close", "Prediction", "Final Up %", "Expected Return %", "RSI", "XAI Suggestion"]].style.format({"Last Close": "₹{:.2f}", "Final Up %": "{:.1f}%", "Expected Return %": "{:+.3f}%", "RSI": "{:.1f}"}), use_container_width=True)
-    st.subheader(f"🛒 {bottom_sector} - Entha Stock Vaanganum? Evlo Qty?")
-    cand = filtered_bottom[(filtered_bottom["Final Up %"] > 50) & (filtered_bottom["Expected Return %"] > 0) & (filtered_bottom["Last Close"].notna()) & (filtered_bottom["Last Close"] > 0)]
-    if only_edge:
-        cand = cand[cand["Edge %"] > 0]
-    cand = cand.sort_values("Final Up %", ascending=False).head(top_n)
-    def charges(value, side):
-        exch = value * (exch_pct + sebi_pct) / 100
-        return {"Brokerage": brokerage, "STT": value * stt_pct / 100, "Stamp Duty": value * stamp_pct / 100 if side == "buy" else 0.0, "Exchange+SEBI": exch, "GST": 0.18 * (brokerage + exch), "DP Charge": dp_charge if side == "sell" else 0.0}
+# ------------------------------------------------
+# PORTFOLIO - amount-ai full-a use panna
+# ------------------------------------------------
+def build_portfolio(df, budget):
+    """df: analysis rows. Return list of dict (Company, Qty, ...) - total buy cost <= budget."""
+    cand = df[(df.prob > 0.5) & (df.exp_ret > 0)].sort_values("exp_ret", ascending=False)
     if cand.empty:
-        st.info("⚠️ Indha sector-la qualify aagura company illa. Cash ah vechurunga - NO TRADE thaan best decision.")
-    else:
-        per_stock = budget / len(cand)
-        rows2, parts = [], []
-        for _, r in cand.iterrows():
-            price = float(r["Last Close"])
-            if not np.isfinite(price) or price <= 0:
+        return []
+    recs = cand.to_dict("records")
+
+    picked, targets = [], []
+    for n in range(min(MAX_STOCKS, len(recs)), 0, -1):
+        pool = [r for r in recs if r["price"] <= budget / n]
+        sel, cnt = [], {}
+        for r in pool:
+            if cnt.get(r["Sector"], 0) >= MAX_PER_SECTOR:
                 continue
-            qty = int(per_stock // price)
-            if qty == 0:
-                continue
-            buy_val = qty * price
-            exp_sell_val = buy_val * (1 + r["Expected Return %"] / 100)
-            bc, sc = charges(buy_val, "buy"), charges(exp_sell_val, "sell")
-            parts.append((bc, sc))
-            rows2.append({"Company": r["Company"], "Sector": r["Sector"], "Buy Price": price, "Qty (No of Count)": qty, "Invested": buy_val, "Exp. Sell Value": exp_sell_val, "Buy Charges": sum(bc.values()), "Sell Charges": sum(sc.values()), "Gross P/L": exp_sell_val - buy_val, "XAI Suggestion": r["XAI Suggestion"]})
-        pf = pd.DataFrame(rows2)
-        pf["Net P/L"] = pf["Gross P/L"] - pf["Buy Charges"] - pf["Sell Charges"]
-        st.dataframe(pf.style.format({c: "₹{:.2f}" for c in pf.columns if c not in ["Company", "Sector", "Qty (No of Count)", "XAI Suggestion"]}), use_container_width=True)
-        invested = pf["Invested"].sum(); buy_ch = pf["Buy Charges"].sum(); sell_ch = pf["Sell Charges"].sum(); cash_left = budget - invested - buy_ch; net = pf["Net P/L"].sum()
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Invested", f"₹{invested:.2f}")
-        c2.metric("Cash Left", f"₹{cash_left:.2f}")
-        c3.metric("Total Charges", f"₹{buy_ch + sell_ch:.2f}")
-        c4.metric("Expected Net P/L", f"₹{net:.2f}", f"{net/invested*100:.2f}%" if invested > 0 else "0%")
-        with st.expander("🧾 Charges Breakdown"):
-            bd_dict = {}
-            for bc, sc in parts:
-                for k in bc:
-                    bd_dict[k] = bd_dict.get(k, 0.0) + bc[k] + sc[k]
-            bd = pd.DataFrame({"Charge": list(bd_dict.keys()), "Rs": list(bd_dict.values())})
-            st.dataframe(bd.style.format({"Rs": "₹{:.2f}"}), hide_index=True)
-    st.warning("⚠️ Education ku mattum. Investment advice illa.")
+            sel.append(r)
+            cnt[r["Sector"]] = cnt.get(r["Sector"], 0) + 1
+            if len(sel) == n:
+                break
+        if len(sel) < n:
+            continue
+        w = np.array([max(r["prob"] - 0.5, 0.005) for r in sel])
+        t = budget * 0.998 * w / w.sum()
+        if all(t[i] >= sel[i]["price"] for i in range(n)):
+            picked, targets = sel, list(t)
+            break
+    if not picked:
+        return []
+
+    qty = [int(targets[i] // picked[i]["price"]) for i in range(len(picked))]
+
+    def total_cost(q):
+        return sum(q[i] * picked[i]["price"] + charges(q[i] * picked[i]["price"], "buy")
+                   for i in range(len(picked)) if q[i] > 0)
+
+    while total_cost(qty) > budget:                      # safety - charges thaandina kuraikkum
+        j = max(range(len(qty)), key=lambda i: qty[i] * picked[i]["price"])
+        qty[j] -= 1
+    while True:                                          # meedhi cash-ku innum share vaangum
+        order = sorted(range(len(qty)),
+                       key=lambda i: qty[i] * picked[i]["price"] / targets[i])
+        for i in order:
+            trial = qty.copy()
+            trial[i] += 1
+            if total_cost(trial) <= budget:
+                qty = trial
+                break
+        else:
+            break
+
+    out = []
+    for i, r in enumerate(picked):
+        if qty[i] > 0:
+            r = dict(r)
+            r["qty"] = qty[i]
+            r["amount"] = qty[i] * r["price"]
+            out.append(r)
+    return out
+
+
+# ===== UI =====
+st.set_page_config(page_title="Nifty-XAI", page_icon="📈", layout="wide")
+st.title("📈 Nifty-XAI")
+st.caption("Nifty 50 stocks-ku naalaiku Up/Down predict panni, un amount-ku edha vaanganum nu sollum. Education project.")
+
+# ---- 1. TOP: scrolling ticker ----
+tick = get_ticker_data()
+if tick:
+    items = "".join(
+        f'<span class="{"up" if ch >= 0 else "dn"}">{"▲" if ch >= 0 else "▼"} {nm} ₹{p:,.2f} ({ch:+.2f}%)</span>'
+        for nm, p, ch in tick)
+    components.html(f"""
+    <style>
+      body{{margin:0}}
+      .wrap{{background:#1a237e;color:#fff;overflow:hidden;white-space:nowrap;border-radius:8px;
+             font:600 14px system-ui,sans-serif;padding:11px 0}}
+      .track{{display:inline-block;padding-left:100%;animation:scroll 150s linear infinite}}
+      .wrap:hover .track{{animation-play-state:paused}}
+      .track span{{margin-right:34px}}
+      .up{{color:#69f0ae}} .dn{{color:#ff8a80}}
+      @keyframes scroll{{from{{transform:translateX(0)}}to{{transform:translateX(-100%)}}}}
+    </style>
+    <div class="wrap"><div class="track">{items}</div></div>
+    """, height=52)
+    st.caption("Nifty 50 - last market close & previous close-la irundhu % change (5 min-ku oru thadava refresh). Mouse vachaa pause aagum.")
 else:
-    st.info("👈 'Run 4 Model Prediction' click pannunga.")
+    st.warning("Ticker data kidaikala (yfinance / internet check pannunga).")
+
+# ---- 2. MIDDLE: amount + button ----
 st.divider()
-st.subheader("🧠 LSTM - Main Model Info")
-st.write("Input (60, 11) -> LSTM 32 + Dropout 0.2 -> LSTM 32 + Dropout 0.2 -> Dense 16 -> Sigmoid | Epochs 8, Batch 32, Adam")
-if LSTM_AVAILABLE:
-    st.success("✅ LSTM Ready")
+c1, c2 = st.columns([2, 1])
+amount = c1.number_input("💰 Amount (Rs)", min_value=1000, max_value=10_000_000,
+                         value=10000, step=1000)
+c2.write("")
+c2.write("")
+go = c2.button("🚀 Predict & Suggest", type="primary", use_container_width=True)
+if go:
+    st.session_state["budget"] = int(amount)
+
+# ---- 3. BOTTOM: result ----
+if "budget" in st.session_state:
+    budget = st.session_state["budget"]
+    with st.spinner("50 companies analyse aagudhu... (first time 1-2 min edukkum)"):
+        try:
+            res, errs = run_analysis(YEARS)
+        except Exception as e:
+            res, errs = pd.DataFrame(), [f"{type(e).__name__}: {e}"]
+
+    if res.empty:
+        st.error("Data / model run aagala. Internet check pannitu thirumba try pannunga.")
+        for e in errs[:5]:
+            st.write(e)
+    else:
+        pf = build_portfolio(res, budget)
+        st.subheader(f"🛒 ₹{budget:,} ku - Entha Stock, Evlo Count")
+        if not pf:
+            st.info("Indha nerathula Up-nu sollura strong stock illa (illa un amount-ku vaanga mudiyala). "
+                    "Cash-ah vechurunga - NO TRADE dhaan best.")
+        else:
+            table = pd.DataFrame([{
+                "Company": r["Company"], "Sector": r["Sector"], "Qty": r["qty"],
+                "Price": f"₹{r['price']:,.2f}", "Amount": f"₹{r['amount']:,.2f}",
+                "Up %": f"{r['prob'] * 100:.1f}%",
+                "XAI - Yen Up? (SHAP)": r["why"],
+            } for r in pf])
+            st.dataframe(table, hide_index=True, use_container_width=True)
+
+            invested = sum(r["amount"] for r in pf)
+            buy_ch = sum(charges(r["amount"], "buy") for r in pf)
+            cash_left = budget - invested - buy_ch
+            exp_sell = sum(r["amount"] * (1 + r["exp_ret"] / 100) for r in pf)
+            sell_ch = sum(charges(r["amount"] * (1 + r["exp_ret"] / 100), "sell") for r in pf)
+            net = exp_sell - invested - buy_ch - sell_ch
+
+            m = st.columns(5)
+            m[0].metric("Amount", f"₹{budget:,.2f}")
+            m[1].metric("Invested", f"₹{invested:,.2f}")
+            m[2].metric("Buy Charges", f"₹{buy_ch:,.2f}")
+            m[3].metric("Cash Left", f"₹{cash_left:,.2f}")
+            m[4].metric("Exp. Net P/L (1 day)", f"₹{net:,.2f}", f"{net / invested * 100:+.2f}%")
+
+            sec_split = pd.DataFrame(pf).groupby("Sector")["amount"].sum().sort_values(ascending=False)
+            st.caption("Sector split: " + " | ".join(f"{s} ₹{a:,.0f}" for s, a in sec_split.items()))
+            roundtrip = buy_ch + sell_ch
+            st.caption(f"Buy + Sell charges (DP ₹{DP_CHARGE} per stock serthu) ≈ ₹{roundtrip:,.2f} "
+                       f"({roundtrip / invested * 100:.2f}% of invested). Naalaiku stock idha vida adhigam move aana dhaan profit.")
+            if net <= 0:
+                st.warning("Expected profit charges-ai cover pannala - 1 naal hold-la loss varra chance adhigam.")
+
+        avg_acc, avg_base = res.acc.mean() * 100, res.base.mean() * 100
+        st.caption(f"Model check (holdout, {len(res)} stocks avg): accuracy {avg_acc:.1f}% vs baseline {avg_base:.1f}% "
+                   f"(edge {avg_acc - avg_base:+.1f}%). Data date: {res.date.max()}. Edge ~0 na prediction random-ku kitta.")
+        st.warning("⚠️ Education ku mattum. Investment advice illa. Daily direction prediction romba kashtam - loss varalam.")
+        if errs:
+            with st.expander(f"⚠️ {len(errs)} stocks skip aachu"):
+                for e in errs:
+                    st.write(e)
 else:
-    st.error("❌ TensorFlow illa - Reboot pannunga")
+    st.info("👆 Amount enter panni, 'Predict & Suggest' click pannunga.")
